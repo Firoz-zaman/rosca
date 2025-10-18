@@ -1,8 +1,10 @@
 'use client'
 
 import { useState } from 'react'
-import { createClient } from '../../../lib/supabase/client'
+import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'  // ← Add this line
+
 
 export default function SignInPage() {
   const [formData, setFormData] = useState({
@@ -96,6 +98,19 @@ export default function SignInPage() {
               placeholder="••••••••"
             />
           </div>
+
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center">
+            {/* Optional: Remember me checkbox */}
+            </div>
+            <Link 
+              href="/auth/forgot-password" 
+              className="text-sm text-blue-700 hover:text-blue-800 font-medium hover:underline"
+              >
+              Forgot password?
+            </Link>
+            </div>
+
 
           <button
             type="submit"
