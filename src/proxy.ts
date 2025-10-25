@@ -1,10 +1,17 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
+  // 🔒 SECURITY FIX: Block CVE-2025-29927 middleware bypass
+  if (request.headers.get('x-middleware-subrequest')) {
+    return new NextResponse('Forbidden', { status: 403 })
+  }
+
   let supabaseResponse = NextResponse.next({
     request,
   })
+  // ... rest of your existing code stays exactly the same
+
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -62,6 +69,7 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     '/dashboard/:path*',
+    '/protected/:path*',
     '/auth/signin',
     '/auth/signup',
   ],
