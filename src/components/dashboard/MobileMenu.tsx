@@ -9,9 +9,10 @@ interface MobileMenuProps {
   isOpen: boolean
   onClose: () => void
   user: User
+  isAdmin: boolean
 }
 
-export default function MobileMenu({ isOpen, onClose, user }: MobileMenuProps) {
+export default function MobileMenu({ isOpen, onClose, user, isAdmin }: MobileMenuProps) {
   const router = useRouter()
   const supabase = createClient()
   const [loading, setLoading] = useState(false)
@@ -77,9 +78,16 @@ export default function MobileMenu({ isOpen, onClose, user }: MobileMenuProps) {
                 </span>
               </div>
               <div>
-                <p className="font-semibold text-slate-900">
-                  {user.user_metadata?.full_name || 'User'}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="font-semibold text-slate-900">
+                    {user.user_metadata?.full_name || 'User'}
+                  </p>
+                  {isAdmin && (
+                    <span className="px-2 py-0.5 bg-purple-100 text-purple-700 text-xs font-semibold rounded-full">
+                      Admin
+                    </span>
+                  )}
+                </div>
                 <p className="text-sm text-slate-600">{user.email}</p>
               </div>
             </div>

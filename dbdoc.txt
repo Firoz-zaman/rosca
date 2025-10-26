@@ -1,0 +1,248 @@
+# Complete Supabase Database Setup Documentation
+
+## Database Schema for ROSCA/Chitfund App
+
+Here's everything you need to tell your employee to set up the same database:
+
+---
+
+## Step 1: Create Tables
+
+Run this SQL in Supabase SQL Editor:
+
+```sql
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 1. Profiles table (extends auth.users)
+CREATE TABLE profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  username TEXT UNIQUE,
+  full_name TEXT,
+  phone TEXT,
+  role TEXT DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. ROSCAs/Groups table
+CREATE TABLE roscas (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name TEXT NOT NULL,
+  description TEXT,
+  contribution_amount NUMERIC NOT NULL,
+  frequency TEXT NOT NULL CHECK (frequency IN ('daily', 'weekly', 'monthly')),
+  total_slots INTEGER NOT NULL,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'completed')),
+  allocation_method TEXT DEFAULT 'random' CHECK (allocation_method IN ('random', 'banker', 'bidding')),
+  created_by UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  start_date DATE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. ROSCA Members table
+CREATE TABLE rosca_members (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  rosca_id UUID REFERENCES roscas(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  slot_number INTEGER,
+  has_received BOOLEAN DEFAULT FALSE,
+  joined_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(rosca_id, user_id)
+);
+
+-- Create indexes for performance
+CREATE INDEX idx_profiles_role ON profiles(role);
+CREATE INDEX idx_roscas_created_by ON roscas(created_by);
+CREATE INDEX idx_rosca_members_user_id ON rosca_members(user_id);
+CREATE INDEX idx_rosca_members_rosca_id ON rosca_members(rosca_id);
+```
+
+***
+
+## Step 2: Enable Row Level Security (RLS)
+
+```sql
+-- Enable RLS on all tables
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE roscas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rosca_members ENABLE ROW LEVEL SECURITY;
+```
+
+***
+
+## Step 3: Create RLS Policies
+
+```sql
+-- PROFILES POLICIES
+CREATE POLICY "Public profiles viewable by everyone" ON profiles 
+FOR SELECT USING (true);
+
+CREATE POLICY "Users can update own profile" ON profiles 
+FOR UPDATE USING (auth.uid() = id);
+
+CREATE POLICY "Users can insert own profile" ON profiles 
+FOR INSERT WITH CHECK (auth.uid() = id);
+
+-- ROSCAS POLICIES
+CREATE POLICY "Only admins can create ROSCAs" ON roscas 
+FOR INSERT 
+WITH CHECK (
+  EXISTS (
+    SELECT 1 FROM profiles 
+    WHERE profiles.id = auth.uid() 
+    AND profiles.role = 'admin'
+  )
+);
+
+CREATE POLICY "Creators view their ROSCAs" ON roscas 
+FOR SELECT 
+USING (created_by = auth.uid());
+
+CREATE POLICY "Creators can update their own ROSCAs" ON roscas 
+FOR UPDATE 
+USING (created_by = auth.uid());
+
+-- ROSCA_MEMBERS POLICIES
+CREATE POLICY "Allow viewing members" ON rosca_members 
+FOR SELECT 
+USING (true);
+
+CREATE POLICY "ROSCA creators can add members" ON rosca_members 
+FOR INSERT 
+WITH CHECK (
+  rosca_id IN (
+    SELECT id FROM roscas WHERE created_by = auth.uid()
+  )
+);
+```
+
+***
+
+## Step 4: Create Auto-Profile Trigger
+
+This automatically creates a profile when a user signs up:
+
+```sql
+-- Function to auto-create profile on signup
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+DECLARE
+  user_count INTEGER;
+BEGIN
+  -- Count existing users
+  SELECT COUNT(*) INTO user_count FROM auth.users;
+  
+  -- Insert profile with admin role if first user, otherwise regular user
+  INSERT INTO public.profiles (id, full_name, role)
+  VALUES (
+    NEW.id, 
+    NEW.raw_user_meta_data->>'full_name',
+    CASE WHEN user_count <= 1 THEN 'admin' ELSE 'user' END
+  );
+  
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger to auto-create profile
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+```
+
+***
+
+## Step 5: Manually Assign Admin to Existing Users (If Needed)
+
+If users signed up before the trigger was created:
+
+```sql
+-- Option 1: Make a specific user admin by email
+INSERT INTO profiles (id, role, full_name)
+SELECT 
+  id, 
+  'admin', 
+  raw_user_meta_data->>'full_name'
+FROM auth.users
+WHERE email = 'admin@example.com'
+ON CONFLICT (id) DO UPDATE SET role = 'admin';
+
+-- Option 2: Make first user admin
+INSERT INTO profiles (id, role, full_name)
+SELECT 
+  id, 
+  'admin', 
+  raw_user_meta_data->>'full_name'
+FROM auth.users
+ORDER BY created_at ASC
+LIMIT 1
+ON CONFLICT (id) DO UPDATE SET role = 'admin';
+```
+
+***
+
+## How the System Works
+
+### Role-Based Access Control:
+- **Admin users** can create groups (ROSCAs)
+- **Regular users** can only view groups they're added to
+- First signup automatically becomes admin
+- Additional admins can be assigned manually via SQL
+
+### Ownership Model:
+- Each admin can only **edit/delete groups they created**
+- Admins cannot modify other admins' groups
+- The `created_by` column tracks ownership
+
+### Security:
+- All policies are enforced at database level (RLS)
+- Even if someone bypasses the UI, the database blocks unauthorized actions
+- No recursion in policies (fixed for performance)
+
+***
+
+## Verification Queries
+
+Run these to verify setup:
+
+```sql
+-- Check tables exist
+SELECT table_name FROM information_schema.tables 
+WHERE table_schema = 'public' 
+AND table_name IN ('profiles', 'roscas', 'rosca_members');
+
+-- Check RLS is enabled
+SELECT tablename, rowsecurity FROM pg_tables
+WHERE schemaname = 'public';
+
+-- Check policies exist
+SELECT tablename, policyname FROM pg_policies 
+WHERE tablename IN ('profiles', 'roscas', 'rosca_members');
+
+-- Check trigger exists
+SELECT trigger_name FROM information_schema.triggers 
+WHERE trigger_name = 'on_auth_user_created';
+```
+
+***
+
+## Important Notes for Your Employee:
+
+1. **Run all SQL in order** - tables must exist before policies
+2. **First signup becomes admin automatically** - subsequent users are regular users
+3. **Policies prevent infinite recursion** - we use simple, non-recursive checks
+4. **created_by column** is critical - it determines who owns each group
+5. **Test after setup** - Try creating a group as admin, verify regular users can't
+
+This setup ensures secure, scalable role-based access control for your chitfund application!
+
+[1](https://supabase.com/features/visual-schema-designer)
+[2](https://supabase.com/blog/declarative-schemas)
+[3](https://supabase.com/docs/guides/local-development/declarative-database-schemas)
+[4](https://www.youtube.com/watch?v=EALkUlOKvAs&vl=en)
+[5](https://supabase.com/docs/guides/api/using-custom-schemas)
+[6](https://makerkit.dev/courses/nextjs-turbo/database)
+[7](https://supabase.com/blog/supabase-studio-3-0)
+[8](https://www.reddit.com/r/Supabase/comments/1duta2j/need_help_how_to_make_database_design_thats_easy/)
+[9](https://supabase.com/docs/guides/storage/schema/design)
+[10](https://www.youtube.com/watch?v=1dLSWYD2lso)

@@ -14,12 +14,22 @@ export default async function DashboardLayout({
     redirect('/auth/signin')
   }
 
+  // 👇 ADD THIS: Fetch user role
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+
   return (
     <div className="min-h-screen bg-slate-50">
-      <Header user={user} />
+      <Header user={user} isAdmin={isAdmin} />
       <main className="pb-20">
         {children}
       </main>
     </div>
   )
 }
+

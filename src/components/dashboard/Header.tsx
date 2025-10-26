@@ -6,9 +6,10 @@ import MobileMenu from './MobileMenu'
 
 interface HeaderProps {
   user: User
+  isAdmin: boolean  // 👈 ADD THIS
 }
 
-export default function Header({ user }: HeaderProps) {
+export default function Header({ user, isAdmin }: HeaderProps) {  // 👈 ADD isAdmin
   const [isMenuOpen, setIsMenuOpen] = useState(false)
 
   return (
@@ -55,8 +56,11 @@ export default function Header({ user }: HeaderProps) {
       <MobileMenu 
         isOpen={isMenuOpen} 
         onClose={() => setIsMenuOpen(false)} 
-        user={user} 
+        user={user}
+        isAdmin={isAdmin}  // 👈 ADD THIS
       />
     </>
   )
 }
+
+
