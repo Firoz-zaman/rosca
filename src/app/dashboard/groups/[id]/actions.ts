@@ -151,7 +151,7 @@ export async function startNewCycle(groupId: string) {
     .insert({
       rosca_id: groupId,
       cycle_number: nextCycleNumber,
-      status: 'pending', // Waiting for admin to start bidding
+      status: 'pending',
       bidding_start_date: null,
       bidding_end_date: null,
       payment_deadline_date: null,
@@ -325,6 +325,33 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       .eq('rosca_id', groupId)
       .eq('user_id', winningBid.user_id)
 
+    // FIXED: Create payment records if they don't exist
+    const { data: existingPayments } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+
+    if (!existingPayments || existingPayments.length === 0) {
+      const { data: members } = await supabase
+        .from('rosca_members')
+        .select('id')
+        .eq('rosca_id', groupId)
+
+      if (members && members.length > 0) {
+        await supabase
+          .from('cycle_payments')
+          .insert(
+            members.map((member) => ({
+              cycle_id: cycleId,
+              member_id: member.id,
+              has_paid: false,
+              verified_by_receiver: false,
+              verified_by_admin: false
+            }))
+          )
+      }
+    }
+
     // Log activity
     await supabase
       .from('cycle_activities')
@@ -346,6 +373,33 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
 
     if (updateError) {
       return { error: 'Failed to start payment phase: ' + updateError.message }
+    }
+
+    // FIXED: Create payment records if they don't exist
+    const { data: existingPayments } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+
+    if (!existingPayments || existingPayments.length === 0) {
+      const { data: members } = await supabase
+        .from('rosca_members')
+        .select('id')
+        .eq('rosca_id', groupId)
+
+      if (members && members.length > 0) {
+        await supabase
+          .from('cycle_payments')
+          .insert(
+            members.map((member) => ({
+              cycle_id: cycleId,
+              member_id: member.id,
+              has_paid: false,
+              verified_by_receiver: false,
+              verified_by_admin: false
+            }))
+          )
+      }
     }
   }
 
@@ -511,4 +565,5 @@ export async function placeBid(cycleId: string, groupId: string, bidAmount: numb
   
   return { success: true }
 }
+
 

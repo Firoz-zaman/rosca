@@ -27,22 +27,48 @@ export default function VerificationPanel({
     }
   }, [isOpen])
 
-  const fetchPayments = async () => {
-    const { data } = await supabase
-      .from('cycle_payments')
-      .select(`
-        *,
-        member:rosca_members!inner(
-          user_id,
-          slot_number,
-          profiles(full_name, username)
-        )
-      `)
-      .eq('cycle_id', cycle.id)
-      .order('member.slot_number', { ascending: true })
+const fetchPayments = async () => {
+  // Fetch payments with basic member info
+  const { data: paymentsData } = await supabase
+    .from('cycle_payments')
+    .select(`
+      *,
+      member:rosca_members!inner(
+        id,
+        user_id,
+        slot_number
+      )
+    `)
+    .eq('cycle_id', cycle.id)
 
-    setPayments(data || [])
-  }
+  console.log('📦 Raw payments data:', paymentsData)  // ← ADD THIS
+
+  // Fetch all member profiles separately
+  const memberIds = paymentsData?.map(p => p.member.user_id) || []
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, full_name, username, email')
+    .in('id', memberIds)
+
+  console.log('👥 Profiles data:', profiles)  // ← ADD THIS
+
+  // Combine payments with profiles
+  const paymentsWithProfiles = paymentsData?.map(payment => ({
+    ...payment,
+    member: {
+      ...payment.member,
+      profiles: profiles?.find(p => p.id === payment.member.user_id) || null
+    }
+  }))
+
+  // Sort by slot number
+  paymentsWithProfiles?.sort((a, b) => a.member.slot_number - b.member.slot_number)
+
+  console.log('✅ Final payments with profiles:', paymentsWithProfiles)  // ← ADD THIS
+
+  setPayments(paymentsWithProfiles || [])
+}
+
 
   const handleVerify = async (memberId: string) => {
     setLoading(memberId)

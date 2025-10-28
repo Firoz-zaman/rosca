@@ -95,7 +95,8 @@ export default function PaymentTracker({
             </p>
             <button
               onClick={handleMarkPaid}
-              disabled={loading}
+              disabled={loading || payment?.has_paid}
+
               className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors disabled:opacity-50"
             >
               {loading ? 'Marking...' : '✓ I Paid'}
