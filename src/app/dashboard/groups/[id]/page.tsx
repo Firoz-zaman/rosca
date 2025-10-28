@@ -49,23 +49,34 @@ export default async function GroupPage({
   }
 
   // Fetch all members
-  const { data: members, error: membersError } = await supabase
+  // Fetch members without nested profile join
+  const { data: membersData, error: membersError } = await supabase
     .from('rosca_members')
     .select(`
       id,
       slot_number,
       has_received,
       joined_at,
-      user_id,
-      profiles (
-        id,
-        full_name,
-        username,
-        phone
-      )
+      user_id
     `)
     .eq('rosca_id', id)
     .order('slot_number', { ascending: true })
+
+  // Fetch all profiles separately in one query
+  const memberIds = membersData?.map(m => m.user_id) || []
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, full_name, username, phone, email')
+    .in('id', memberIds)
+
+  // Combine members with their profiles
+  const members = membersData?.map(member => {
+    const profile = profiles?.find(p => p.id === member.user_id)
+    return {
+      ...member,
+      profiles: profile || null
+    }
+  }) || []
 
   // Check permissions
   const isCreator = user.id === group.created_by
@@ -87,7 +98,7 @@ export default async function GroupPage({
     .from('payment_cycles')
     .select('*')
     .eq('rosca_id', id)
-    .in('status', ['bidding', 'payment', 'overdue'])
+    .in('status', ['pending','bidding', 'payment', 'overdue'])
     .order('cycle_number', { ascending: false })
     .limit(1)
     .single()
