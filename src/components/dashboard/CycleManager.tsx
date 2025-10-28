@@ -6,11 +6,14 @@ import PaymentTracker from './PaymentTracker'
 import ActivityFeed from './ActivityFeed'
 import VerificationPanel from './VerificationPanel'
 import AdminOverduePanel from './AdminOverduePanel'
+import StartBiddingButton from './StartBiddingButton'
+import EndBiddingButton from './EndBiddingButton'
+import EndPaymentButton from './EndpaymentButton.tsx'
 
 /**
  * CycleManager - Main container for current cycle
  * Shows different UI based on:
- * - Cycle status (bidding/payment/overdue)
+ * - Cycle status (pending/bidding/payment/overdue/completed)
  * - Allocation method (bidding/random/banker)
  * - User role (member/receiver/admin)
  */
@@ -31,10 +34,16 @@ export default function CycleManager({
 }) {
   const [activeTab, setActiveTab] = useState<'activity' | 'payment'>('activity')
 
-  // Don't show bidding UI for non-bidding groups
-  const showBidding = group.allocation_method === 'bidding' && cycle.status === 'bidding'
-  const showPayment = cycle.status === 'payment' || cycle.status === 'overdue'
+  // Status checks
+  const isPending = cycle.status === 'pending'
+  const isBidding = cycle.status === 'bidding'
+  const isPayment = cycle.status === 'payment'
   const isOverdue = cycle.status === 'overdue'
+  const isCompleted = cycle.status === 'completed'
+
+  // UI visibility
+  const showBidding = group.allocation_method === 'bidding' && isBidding
+  const showPayment = isPayment || isOverdue
 
   return (
     <div className="space-y-4">
@@ -44,25 +53,90 @@ export default function CycleManager({
           <div>
             <h2 className="text-2xl font-bold">Cycle {cycle.cycle_number}</h2>
             <p className="text-blue-100 mt-1">
-              {cycle.status === 'bidding' && 'Bidding Phase Active'}
-              {cycle.status === 'payment' && 'Payment Phase - Send contributions'}
-              {cycle.status === 'overdue' && '⚠️ Payment Deadline Passed'}
-              {cycle.status === 'completed' && '✓ Cycle Completed'}
+              {isPending && '⏳ Waiting to start bidding phase'}
+              {isBidding && '🎯 Bidding Phase Active'}
+              {isPayment && '💰 Payment Phase - Send contributions'}
+              {isOverdue && '⚠️ Payment Deadline Passed'}
+              {isCompleted && '✅ Cycle Completed'}
             </p>
           </div>
           
           <div className="text-right">
             <span className={`px-4 py-2 rounded-full text-sm font-semibold ${
-              cycle.status === 'bidding' ? 'bg-yellow-400 text-yellow-900' :
-              cycle.status === 'payment' ? 'bg-green-400 text-green-900' :
-              cycle.status === 'overdue' ? 'bg-red-400 text-red-900' :
-              'bg-gray-400 text-gray-900'
+              isPending ? 'bg-gray-400 text-gray-900' :
+              isBidding ? 'bg-yellow-400 text-yellow-900' :
+              isPayment ? 'bg-green-400 text-green-900' :
+              isOverdue ? 'bg-red-400 text-red-900' :
+              'bg-blue-400 text-blue-900'
             }`}>
               {cycle.status.toUpperCase()}
             </span>
           </div>
         </div>
       </div>
+
+      {/* Admin Control Panel - Shows different button based on status */}
+      {(isAdmin || group.created_by === currentUser.id) && (
+        <div className="bg-white rounded-lg border-2 border-blue-200 p-6">
+          <h3 className="text-lg font-bold text-gray-900 mb-4">
+            🎮 Admin Controls
+          </h3>
+          
+          {/* Status: PENDING - Show Start Bidding Button */}
+          {isPending && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600">
+                Ready to start the cycle? Click below to open bidding for members.
+              </p>
+              <StartBiddingButton cycleId={cycle.id} groupId={group.id} />
+            </div>
+          )}
+
+          {/* Status: BIDDING - Show End Bidding Button */}
+          {isBidding && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600">
+                Bidding is open. When ready, end bidding to select winner and start payment phase.
+              </p>
+              <EndBiddingButton cycleId={cycle.id} groupId={group.id} />
+            </div>
+          )}
+
+          {/* Status: PAYMENT - Show Complete Cycle Button */}
+          {(isPayment || isOverdue) && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600">
+                Once all payments are verified, complete the cycle to move to the next round.
+              </p>
+              <EndPaymentButton cycleId={cycle.id} groupId={group.id} />
+            </div>
+          )}
+
+          {/* Status: COMPLETED */}
+          {isCompleted && (
+            <div className="text-center p-4 bg-green-50 rounded-lg">
+              <p className="text-green-700 font-medium">
+                ✅ Cycle {cycle.cycle_number} completed successfully!
+              </p>
+              <p className="text-sm text-gray-600 mt-2">
+                You can start a new cycle when ready.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Pending State - Info for regular members */}
+      {isPending && !isAdmin && group.created_by !== currentUser.id && (
+        <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6 text-center">
+          <p className="text-yellow-800 font-medium">
+            ⏳ Waiting for admin to start bidding phase...
+          </p>
+          <p className="text-sm text-yellow-700 mt-2">
+            You'll be notified when bidding opens.
+          </p>
+        </div>
+      )}
 
       {/* Bidding Box (only for bidding allocation + active bidding) */}
       {showBidding && !hasMemberReceived && (
@@ -74,56 +148,63 @@ export default function CycleManager({
       )}
 
       {/* Tab Navigation */}
-      <div className="flex gap-2 border-b border-gray-200">
-        <button
-          onClick={() => setActiveTab('activity')}
-          className={`px-4 py-3 font-medium transition-colors ${
-            activeTab === 'activity' 
-              ? 'border-b-2 border-blue-600 text-blue-600'
-              : 'text-gray-600 hover:text-gray-900'
-          }`}
-        >
-          Activity Feed
-        </button>
-        {showPayment && (
+      {!isPending && (
+        <div className="flex gap-2 border-b border-gray-200">
           <button
-            onClick={() => setActiveTab('payment')}
+            onClick={() => setActiveTab('activity')}
             className={`px-4 py-3 font-medium transition-colors ${
-              activeTab === 'payment'
+              activeTab === 'activity' 
                 ? 'border-b-2 border-blue-600 text-blue-600'
                 : 'text-gray-600 hover:text-gray-900'
             }`}
           >
-            Payments
+            Activity Feed
           </button>
-        )}
-      </div>
-
-      {/* Content */}
-      {activeTab === 'activity' && (
-        <ActivityFeed cycleId={cycle.id} />
-      )}
-
-      {activeTab === 'payment' && showPayment && (
-        <div className="space-y-4">
-          {/* Payment Tracker for regular members */}
-          <PaymentTracker 
-            cycle={cycle}
-            currentUser={currentUser}
-            isReceiver={isReceiver}
-          />
-
-          {/* Verification Panel for receiver */}
-          {isReceiver && !isOverdue && (
-            <VerificationPanel cycle={cycle} groupId={group.id} />
-          )}
-
-          {/* Admin Panel for overdue payments */}
-          {isAdmin && isOverdue && (
-            <AdminOverduePanel cycle={cycle} groupId={group.id} />
+          {showPayment && (
+            <button
+              onClick={() => setActiveTab('payment')}
+              className={`px-4 py-3 font-medium transition-colors ${
+                activeTab === 'payment'
+                  ? 'border-b-2 border-blue-600 text-blue-600'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              Payments
+            </button>
           )}
         </div>
+      )}
+
+      {/* Content */}
+      {!isPending && (
+        <>
+          {activeTab === 'activity' && (
+            <ActivityFeed cycleId={cycle.id} />
+          )}
+
+          {activeTab === 'payment' && showPayment && (
+            <div className="space-y-4">
+              {/* Payment Tracker for regular members */}
+              <PaymentTracker 
+                cycle={cycle}
+                currentUser={currentUser}
+                isReceiver={isReceiver}
+              />
+
+              {/* Verification Panel for receiver */}
+              {isReceiver && !isOverdue && (
+                <VerificationPanel cycle={cycle} groupId={group.id} />
+              )}
+
+              {/* Admin Panel for overdue payments */}
+              {isAdmin && isOverdue && (
+                <AdminOverduePanel cycle={cycle} groupId={group.id} />
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
 }
+

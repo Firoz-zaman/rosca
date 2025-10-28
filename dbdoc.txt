@@ -236,13 +236,229 @@ WHERE trigger_name = 'on_auth_user_created';
 
 This setup ensures secure, scalable role-based access control for your chitfund application!
 
-[1](https://supabase.com/features/visual-schema-designer)
-[2](https://supabase.com/blog/declarative-schemas)
-[3](https://supabase.com/docs/guides/local-development/declarative-database-schemas)
-[4](https://www.youtube.com/watch?v=EALkUlOKvAs&vl=en)
-[5](https://supabase.com/docs/guides/api/using-custom-schemas)
-[6](https://makerkit.dev/courses/nextjs-turbo/database)
-[7](https://supabase.com/blog/supabase-studio-3-0)
-[8](https://www.reddit.com/r/Supabase/comments/1duta2j/need_help_how_to_make_database_design_thats_easy/)
-[9](https://supabase.com/docs/guides/storage/schema/design)
-[10](https://www.youtube.com/watch?v=1dLSWYD2lso)
+
+
+
+
+
+
+
+
+
+
+
+-- ============================================
+-- PAYMENT CYCLES TABLE
+-- Tracks each rotation cycle in a ROSCA group
+-- ============================================
+CREATE TABLE payment_cycles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  rosca_id UUID NOT NULL REFERENCES roscas(id) ON DELETE CASCADE,
+  cycle_number INTEGER NOT NULL,
+  
+  -- Status workflow: bidding → payment → completed → overdue (if needed)
+  status TEXT NOT NULL DEFAULT 'bidding' 
+    CHECK (status IN ('bidding', 'payment', 'completed', 'overdue')),
+  
+  -- Timestamps for each phase
+  bidding_start_date TIMESTAMPTZ NOT NULL,
+  bidding_end_date TIMESTAMPTZ NOT NULL,
+  payment_deadline_date TIMESTAMPTZ NOT NULL,
+  cycle_end_date TIMESTAMPTZ NOT NULL,
+  
+  -- Winner (receiver) of this cycle
+  winner_id UUID REFERENCES profiles(id),
+  winning_bid_amount NUMERIC(10, 2),
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  
+  -- Ensure one cycle per number per group
+  UNIQUE(rosca_id, cycle_number)
+);
+
+-- Index for querying active cycles
+CREATE INDEX idx_cycles_rosca_status ON payment_cycles(rosca_id, status);
+CREATE INDEX idx_cycles_dates ON payment_cycles(bidding_end_date, payment_deadline_date);
+
+
+-- ============================================
+-- CYCLE BIDS TABLE
+-- Stores all bids placed during bidding phase
+-- ============================================
+CREATE TABLE cycle_bids (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  cycle_id UUID NOT NULL REFERENCES payment_cycles(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  bid_amount NUMERIC(10, 2) NOT NULL,
+  is_winner BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index for bid leaderboard queries
+CREATE INDEX idx_bids_cycle ON cycle_bids(cycle_id, bid_amount);
+CREATE INDEX idx_bids_user ON cycle_bids(user_id, cycle_id);
+
+
+-- ============================================
+-- CYCLE PAYMENTS TABLE
+-- Tracks who paid and who verified for each cycle
+-- ============================================
+CREATE TABLE cycle_payments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  cycle_id UUID NOT NULL REFERENCES payment_cycles(id) ON DELETE CASCADE,
+  member_id UUID NOT NULL REFERENCES rosca_members(id) ON DELETE CASCADE,
+  
+  -- Payment tracking
+  has_paid BOOLEAN DEFAULT FALSE,
+  paid_at TIMESTAMPTZ,
+  
+  -- Verification tracking
+  verified_by_receiver BOOLEAN DEFAULT FALSE,
+  receiver_verified_at TIMESTAMPTZ,
+  
+  -- Admin override for late payments
+  verified_by_admin BOOLEAN DEFAULT FALSE,
+  admin_verified_at TIMESTAMPTZ,
+  admin_id UUID REFERENCES profiles(id), -- Which admin verified
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  
+  -- One payment record per member per cycle
+  UNIQUE(cycle_id, member_id)
+);
+
+-- Index for payment status queries
+CREATE INDEX idx_payments_cycle ON cycle_payments(cycle_id, has_paid, verified_by_receiver);
+CREATE INDEX idx_payments_member ON cycle_payments(member_id);
+
+
+-- ============================================
+-- CYCLE ACTIVITIES TABLE
+-- Activity feed for chat-style UI display
+-- ============================================
+CREATE TABLE cycle_activities (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  cycle_id UUID NOT NULL REFERENCES payment_cycles(id) ON DELETE CASCADE,
+  
+  activity_type TEXT NOT NULL CHECK (activity_type IN (
+    'cycle_started',
+    'bidding_opened',
+    'bid_placed',
+    'bidding_closed',
+    'winner_declared',
+    'payment_phase_started',
+    'payment_made',
+    'payment_verified',
+    'cycle_completed',
+    'admin_verified_payment'
+  )),
+  
+  user_id UUID REFERENCES profiles(id), -- Who performed the action
+  
+  -- Flexible metadata storage (bid amounts, timestamps, etc.)
+  metadata JSONB DEFAULT '{}',
+  
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index for activity feed queries
+CREATE INDEX idx_activities_cycle ON cycle_activities(cycle_id, created_at DESC);
+
+
+-- ============================================
+-- RLS POLICIES
+-- ============================================
+
+-- Payment Cycles: Members can view cycles of groups they belong to
+ALTER TABLE payment_cycles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Members can view their group cycles"
+  ON payment_cycles FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM rosca_members
+      WHERE rosca_members.rosca_id = payment_cycles.rosca_id
+      AND rosca_members.user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "System can manage cycles"
+  ON payment_cycles FOR ALL
+  USING (true)
+  WITH CHECK (true);
+
+
+-- Cycle Bids: Members can view and create bids for their group cycles
+ALTER TABLE cycle_bids ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Members can view bids in their cycles"
+  ON cycle_bids FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM payment_cycles pc
+      JOIN rosca_members rm ON rm.rosca_id = pc.rosca_id
+      WHERE pc.id = cycle_bids.cycle_id
+      AND rm.user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Members can create bids"
+  ON cycle_bids FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+
+
+-- Cycle Payments: Members can view and update their own payments
+ALTER TABLE cycle_payments ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Members can view payments in their cycles"
+  ON cycle_payments FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM payment_cycles pc
+      JOIN rosca_members rm ON rm.rosca_id = pc.rosca_id
+      WHERE pc.id = cycle_payments.cycle_id
+      AND rm.user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Members can update their payment status"
+  ON cycle_payments FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1 FROM rosca_members
+      WHERE rosca_members.id = cycle_payments.member_id
+      AND rosca_members.user_id = auth.uid()
+    )
+  );
+
+
+-- Cycle Activities: Members can view activities in their group cycles
+ALTER TABLE cycle_activities ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Members can view activities in their cycles"
+  ON cycle_activities FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM payment_cycles pc
+      JOIN rosca_members rm ON rm.rosca_id = pc.rosca_id
+      WHERE pc.id = cycle_activities.cycle_id
+      AND rm.user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "System can create activities"
+  ON cycle_activities FOR INSERT
+  WITH CHECK (true);
+
+
+
+
+
+
+
+
+
+
+
+
+

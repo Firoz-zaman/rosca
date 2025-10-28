@@ -5,27 +5,16 @@ import { revalidatePath } from 'next/cache'
 
 /**
  * Add Member to Group Server Action
- * 
- * Security:
- * - Verifies user is authenticated
- * - Checks user is group creator (via RLS policy)
- * - Validates group has available slots
- * - Ensures user exists before adding
- * 
- * @param groupId - UUID of the ROSCA group
- * @param memberEmail - Email of user to add
  */
 export async function addMemberToGroup(groupId: string, memberEmail: string) {
   const supabase = await createClient()
   
-  // 1. Authenticate current user
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   
   if (authError || !user) {
     return { error: 'Not authenticated' }
   }
 
-  // 2. Verify group exists and user is creator
   const { data: group, error: groupError } = await supabase
     .from('roscas')
     .select('id, created_by, total_slots')
@@ -40,13 +29,10 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
     return { error: 'Only group creator can add members' }
   }
 
-  // 3. FIXED: Find user by email from auth.users metadata
-  // First get all profiles to check against auth users
   const { data: allProfiles } = await supabase
     .from('profiles')
     .select('id, email')
   
-  // Find the profile with matching email
   const memberProfile = allProfiles?.find(
     p => p.email?.toLowerCase() === memberEmail.trim().toLowerCase()
   )
@@ -55,7 +41,6 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
     return { error: 'User not found. They must create an account first.' }
   }
 
-  // 4. Check if user is already a member
   const { data: existingMember } = await supabase
     .from('rosca_members')
     .select('id')
@@ -67,7 +52,6 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
     return { error: 'User is already a member of this group' }
   }
 
-  // 5. Check available slots
   const { count: currentMembers } = await supabase
     .from('rosca_members')
     .select('id', { count: 'exact', head: true })
@@ -77,10 +61,8 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
     return { error: 'Group is full' }
   }
 
-  // 6. Assign next available slot number
   const nextSlot = (currentMembers || 0) + 1
 
-  // 7. Add member to group
   const { data: insertedMember, error: insertError } = await supabase
     .from('rosca_members')
     .insert({
@@ -99,7 +81,6 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
 
   console.log('✅ Member added successfully:', insertedMember)
 
-  // 8. Revalidate page to show new member
   revalidatePath(`/dashboard/groups/${groupId}`)
   
   return { 
@@ -109,8 +90,8 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
 }
 
 /**
- * Start a new cycle for the group
- * Only group creator or admin can start cycles
+ * Start a new cycle (creates cycle in 'pending' status)
+ * Admin will manually start bidding phase
  */
 export async function startNewCycle(groupId: string) {
   const supabase = await createClient()
@@ -120,7 +101,6 @@ export async function startNewCycle(groupId: string) {
     return { error: 'Not authenticated' }
   }
 
-  // Get group details
   const { data: group } = await supabase
     .from('roscas')
     .select('*')
@@ -131,7 +111,6 @@ export async function startNewCycle(groupId: string) {
     return { error: 'Group not found' }
   }
 
-  // Check if user is creator or admin
   const { data: profile } = await supabase
     .from('profiles')
     .select('role')
@@ -145,7 +124,18 @@ export async function startNewCycle(groupId: string) {
     return { error: 'Only group creator or admin can start cycles' }
   }
 
-  // Get current cycle count
+  // Check if there's already an active cycle
+  const { data: activeCycle } = await supabase
+    .from('payment_cycles')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .in('status', ['pending', 'bidding', 'payment', 'overdue'])
+    .single()
+
+  if (activeCycle) {
+    return { error: 'There is already an active cycle. Complete it first.' }
+  }
+
   const { count: cycleCount } = await supabase
     .from('payment_cycles')
     .select('id', { count: 'exact', head: true })
@@ -153,44 +143,19 @@ export async function startNewCycle(groupId: string) {
 
   const nextCycleNumber = (cycleCount || 0) + 1
 
-  // Calculate dates based on frequency
-  const now = new Date()
-  let biddingEnd = new Date(now)
-  let paymentDeadline = new Date(now)
-  let cycleEnd = new Date(now)
-
-  switch (group.frequency) {
-    case 'daily':
-      biddingEnd.setHours(now.getHours() + 12) // 12 hours bidding
-      paymentDeadline.setHours(now.getHours() + 19) // 19 hours total
-      cycleEnd.setDate(now.getDate() + 1)
-      break
-    case 'weekly':
-      biddingEnd.setDate(now.getDate() + 3) // 3 days bidding
-      paymentDeadline.setDate(now.getDate() + 5) // 5 days payment
-      cycleEnd.setDate(now.getDate() + 7)
-      break
-    case 'monthly':
-      biddingEnd.setDate(now.getDate() + 15) // 15 days bidding
-      paymentDeadline.setDate(now.getDate() + 24) // 24 days payment
-      cycleEnd.setMonth(now.getMonth() + 1)
-      break
-  }
-
-  // Calculate starting bid (total pool amount)
   const totalAmount = group.contribution_amount * group.total_slots
 
-  // Create cycle
+  // Create cycle in 'pending' status - admin will manually start bidding
   const { data: cycle, error: cycleError } = await supabase
     .from('payment_cycles')
     .insert({
       rosca_id: groupId,
       cycle_number: nextCycleNumber,
-      status: group.allocation_method === 'bidding' ? 'bidding' : 'payment',
-      bidding_start_date: now.toISOString(),
-      bidding_end_date: biddingEnd.toISOString(),
-      payment_deadline_date: paymentDeadline.toISOString(),
-      cycle_end_date: cycleEnd.toISOString(),
+      status: 'pending', // Waiting for admin to start bidding
+      bidding_start_date: null,
+      bidding_end_date: null,
+      payment_deadline_date: null,
+      cycle_end_date: null,
       winning_bid_amount: totalAmount
     })
     .select()
@@ -220,27 +185,330 @@ export async function startNewCycle(groupId: string) {
       )
   }
 
-  // Create activity log
   await supabase
     .from('cycle_activities')
     .insert({
       cycle_id: cycle.id,
-      activity_type: 'cycle_started',
+      activity_type: 'cycle_created',
       user_id: user.id
     })
-
-  // If bidding, create another activity
-  if (group.allocation_method === 'bidding') {
-    await supabase
-      .from('cycle_activities')
-      .insert({
-        cycle_id: cycle.id,
-        activity_type: 'bidding_opened',
-        user_id: user.id
-      })
-  }
 
   revalidatePath(`/dashboard/groups/${groupId}`)
   
   return { success: true, cycleNumber: nextCycleNumber }
 }
+
+/**
+ * Start Bidding Phase
+ * Admin/Creator manually starts the bidding
+ */
+export async function startBiddingPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Verify user is admin/creator
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can start bidding' }
+  }
+
+  // Update cycle to bidding status
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'bidding',
+      bidding_start_date: new Date().toISOString()
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to start bidding: ' + updateError.message }
+  }
+
+  // Log activity
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'bidding_opened',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * End Bidding Phase and Select Winner
+ * Admin/Creator manually ends bidding
+ */
+export async function endBiddingPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by, allocation_method')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can end bidding' }
+  }
+
+  if (group?.allocation_method === 'bidding') {
+    // Find lowest bid
+    const { data: bids } = await supabase
+      .from('cycle_bids')
+      .select('*')
+      .eq('cycle_id', cycleId)
+      .order('bid_amount', { ascending: true })
+      .limit(1)
+
+    if (!bids || bids.length === 0) {
+      return { error: 'No bids placed yet. Cannot end bidding.' }
+    }
+
+    const winningBid = bids[0]
+
+    // Update cycle with winner
+    const { error: updateError } = await supabase
+      .from('payment_cycles')
+      .update({
+        status: 'payment',
+        bidding_end_date: new Date().toISOString(),
+        winner_id: winningBid.user_id,
+        winning_bid_amount: winningBid.bid_amount
+      })
+      .eq('id', cycleId)
+
+    if (updateError) {
+      return { error: 'Failed to end bidding: ' + updateError.message }
+    }
+
+    // Mark winner as having received
+    await supabase
+      .from('rosca_members')
+      .update({ has_received: true })
+      .eq('rosca_id', groupId)
+      .eq('user_id', winningBid.user_id)
+
+    // Log activity
+    await supabase
+      .from('cycle_activities')
+      .insert({
+        cycle_id: cycleId,
+        activity_type: 'bidding_closed',
+        user_id: user.id,
+        metadata: { winner_id: winningBid.user_id, amount: winningBid.bid_amount }
+      })
+  } else {
+    // Random/Sequential allocation - just move to payment
+    const { error: updateError } = await supabase
+      .from('payment_cycles')
+      .update({
+        status: 'payment',
+        bidding_end_date: new Date().toISOString()
+      })
+      .eq('id', cycleId)
+
+    if (updateError) {
+      return { error: 'Failed to start payment phase: ' + updateError.message }
+    }
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * End Payment Collection Phase and Complete Cycle
+ * Admin/Creator manually closes the cycle
+ */
+export async function endPaymentPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can end payment phase' }
+  }
+
+  // Check if all payments are verified
+  const { data: payments, count: unpaidCount } = await supabase
+    .from('cycle_payments')
+    .select('*', { count: 'exact' })
+    .eq('cycle_id', cycleId)
+    .eq('verified_by_receiver', false)
+
+  if (unpaidCount && unpaidCount > 0) {
+    return { 
+      error: `${unpaidCount} payment(s) not yet verified. Verify all payments before ending cycle.`,
+      unpaidCount 
+    }
+  }
+
+  // Mark cycle as completed
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'completed',
+      cycle_end_date: new Date().toISOString()
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to complete cycle: ' + updateError.message }
+  }
+
+  // Log activity
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'cycle_completed',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * Place a bid (for bidding allocation method)
+ */
+export async function placeBid(cycleId: string, groupId: string, bidAmount: number) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Get cycle details
+  const { data: cycle } = await supabase
+    .from('payment_cycles')
+    .select('*, roscas(contribution_amount, total_slots)')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycle || cycle.status !== 'bidding') {
+    return { error: 'Bidding is not open for this cycle' }
+  }
+
+  // Check if user is member and hasn't received
+  const { data: member } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+    .eq('user_id', user.id)
+    .single()
+
+  if (!member) {
+    return { error: 'You are not a member of this group' }
+  }
+
+  if (member.has_received) {
+    return { error: 'You have already received your payout' }
+  }
+
+  const totalAmount = cycle.roscas.contribution_amount * cycle.roscas.total_slots
+
+  if (bidAmount > totalAmount) {
+    return { error: 'Bid cannot exceed total pool amount' }
+  }
+
+  if (bidAmount < cycle.roscas.contribution_amount) {
+    return { error: 'Bid must be at least the contribution amount' }
+  }
+
+  // Check for existing bid
+  const { data: existingBid } = await supabase
+    .from('cycle_bids')
+    .select('id')
+    .eq('cycle_id', cycleId)
+    .eq('user_id', user.id)
+    .single()
+
+  if (existingBid) {
+    // Update existing bid
+    const { error: updateError } = await supabase
+      .from('cycle_bids')
+      .update({ bid_amount: bidAmount })
+      .eq('id', existingBid.id)
+
+    if (updateError) {
+      return { error: 'Failed to update bid: ' + updateError.message }
+    }
+  } else {
+    // Insert new bid
+    const { error: insertError } = await supabase
+      .from('cycle_bids')
+      .insert({
+        cycle_id: cycleId,
+        user_id: user.id,
+        bid_amount: bidAmount
+      })
+
+    if (insertError) {
+      return { error: 'Failed to place bid: ' + insertError.message }
+    }
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
