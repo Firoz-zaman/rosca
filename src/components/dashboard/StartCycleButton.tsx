@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { startNewCycle } from '@/app/dashboard/groups/[id]/actions'
+import { startNewCycle } from '@/app/dashboard/groups/[id]/cycle-actions'
 
 export default function StartCycleButton({ groupId }: { groupId: string }) {
   const [loading, setLoading] = useState(false)

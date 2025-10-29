@@ -32,7 +32,7 @@ export default function CycleManager({
   isReceiver: boolean
   hasMemberReceived: boolean
 }) {
-  const [activeTab, setActiveTab] = useState<'activity' | 'payment'>('activity')
+  const [activeTab, setActiveTab] = useState('activity') // 'payment' | 'activity'
 
   // Status checks
   const isPending = cycle.status === 'pending'
@@ -40,6 +40,10 @@ export default function CycleManager({
   const isPayment = cycle.status === 'payment'
   const isOverdue = cycle.status === 'overdue'
   const isCompleted = cycle.status === 'completed'
+
+  // ✅ Check if user is actually a member (not just creator)
+  const isMember = hasMemberReceived !== undefined // If has_received exists, they're a member
+  const isCreator = group.created_by === currentUser.id
 
   // UI visibility
   const showBidding = group.allocation_method === 'bidding' && isBidding
@@ -53,14 +57,14 @@ export default function CycleManager({
           <div>
             <h2 className="text-2xl font-bold">Cycle {cycle.cycle_number}</h2>
             <p className="text-blue-100 mt-1">
-              {isPending && '⏳ Waiting to start bidding phase'}
-              {isBidding && '🎯 Bidding Phase Active'}
-              {isPayment && '💰 Payment Phase - Send contributions'}
-              {isOverdue && '⚠️ Payment Deadline Passed'}
-              {isCompleted && '✅ Cycle Completed'}
+              {isPending && 'Waiting to start bidding phase'}
+              {isBidding && 'Bidding Phase Active'}
+              {isPayment && 'Payment Phase - Send contributions'}
+              {isOverdue && 'Payment Deadline Passed'}
+              {isCompleted && 'Cycle Completed'}
             </p>
           </div>
-          
+
           <div className="text-right">
             <span className={`px-4 py-2 rounded-full text-sm font-semibold ${
               isPending ? 'bg-gray-400 text-gray-900' :
@@ -78,10 +82,8 @@ export default function CycleManager({
       {/* Admin Control Panel - Shows different button based on status */}
       {(isAdmin || group.created_by === currentUser.id) && (
         <div className="bg-white rounded-lg border-2 border-blue-200 p-6">
-          <h3 className="text-lg font-bold text-gray-900 mb-4">
-            🎮 Admin Controls
-          </h3>
-          
+          <h3 className="text-lg font-bold text-gray-900 mb-4">📊 Admin Controls</h3>
+
           {/* Status: PENDING - Show Start Bidding Button */}
           {isPending && (
             <div className="space-y-3">
@@ -126,7 +128,7 @@ export default function CycleManager({
         </div>
       )}
 
-      {/* Pending State - Info for regular members */}
+      {/* Pending State - Info for regular members (non-admins, non-creators) */}
       {isPending && !isAdmin && group.created_by !== currentUser.id && (
         <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6 text-center">
           <p className="text-yellow-800 font-medium">
@@ -138,12 +140,12 @@ export default function CycleManager({
         </div>
       )}
 
-      {/* Bidding Box (only for bidding allocation + active bidding) */}
-      {showBidding && !hasMemberReceived && (
+      {/* ✅ FIXED: Bidding Box - Show to members OR admins (even non-participating) */}
+      {showBidding && (isMember ? !hasMemberReceived : isCreator || isAdmin) && (
         <BiddingBox 
-          cycle={cycle}
-          group={group}
-          currentUser={currentUser}
+          cycle={cycle} 
+          group={group} 
+          currentUser={currentUser} 
         />
       )}
 
@@ -153,13 +155,14 @@ export default function CycleManager({
           <button
             onClick={() => setActiveTab('activity')}
             className={`px-4 py-3 font-medium transition-colors ${
-              activeTab === 'activity' 
+              activeTab === 'activity'
                 ? 'border-b-2 border-blue-600 text-blue-600'
                 : 'text-gray-600 hover:text-gray-900'
             }`}
           >
-            Activity Feed
+            📋 Activity Feed
           </button>
+
           {showPayment && (
             <button
               onClick={() => setActiveTab('payment')}
@@ -169,7 +172,7 @@ export default function CycleManager({
                   : 'text-gray-600 hover:text-gray-900'
               }`}
             >
-              Payments
+              💰 Payments
             </button>
           )}
         </div>
@@ -178,20 +181,21 @@ export default function CycleManager({
       {/* Content */}
       {!isPending && (
         <>
-          {activeTab === 'activity' && (
-            <ActivityFeed cycleId={cycle.id} />
-          )}
+          {/* ✅ FIXED: Activity Feed - Always show (no member check) */}
+          {activeTab === 'activity' && <ActivityFeed cycleId={cycle.id} />}
 
+          {/* Payment Tab */}
           {activeTab === 'payment' && showPayment && (
             <div className="space-y-4">
-              {/* Payment Tracker for regular members */}
-                <PaymentTracker 
+              {/* ✅ FIXED: Payment Tracker - Only for actual members */}
+              {isMember && (
+                <PaymentTracker
                   cycle={cycle}
                   currentUser={currentUser}
                   isReceiver={isReceiver}
-                  group={group}  // ← ADD THIS
+                  group={group}
                 />
-
+              )}
 
               {/* Verification Panel for receiver */}
               {isReceiver && !isOverdue && (
@@ -202,6 +206,28 @@ export default function CycleManager({
               {isAdmin && isOverdue && (
                 <AdminOverduePanel cycle={cycle} groupId={group.id} />
               )}
+
+              {/* ✅ FIXED: Non-participating admin view - with verification panel */}
+              {!isMember && (isCreator || isAdmin) && (
+                <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-6">
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="text-2xl">🎯</span>
+                    <div>
+                      <p className="text-blue-900 font-semibold">
+                        Managing as Banker (Non-Participant)
+                      </p>
+                      <p className="text-sm text-blue-700 mt-1">
+                        You're managing this group without participating in payments.
+                      </p>
+                    </div>
+                  </div>
+                  
+                  {/* Allow admin to verify payments even if not participating */}
+                  {!isOverdue && (
+                    <VerificationPanel cycle={cycle} groupId={group.id} />
+                  )}
+                </div>
+              )}
             </div>
           )}
         </>
@@ -209,4 +235,6 @@ export default function CycleManager({
     </div>
   )
 }
+
+
 

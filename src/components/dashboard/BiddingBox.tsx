@@ -4,31 +4,75 @@ import { useState, useEffect } from 'react'
 import { placeBid } from '@/app/dashboard/groups/[id]/cycle-actions'
 import { createClient } from '@/lib/supabase/client'
 
-/**
- * BiddingBox - Interactive bidding interface
- * Features:
- * - Manual bid input
- * - Quick percentage discount buttons (1%, 2%, 5%)
- * - Down Bid button to submit
- * - Live bid queue showing all bids
- */
-export default function BiddingBox({ cycle, group, currentUser }: any) {
-  const supabase = createClient()
-  const totalAmount = group.contribution_amount * group.total_slots
-  const [currentBid, setCurrentBid] = useState(totalAmount)
-  const [inputValue, setInputValue] = useState(totalAmount.toString())
+export default function BiddingBox({ 
+  cycle, 
+  group, 
+  currentUser 
+}: { 
+  cycle: any
+  group: any
+  currentUser: any
+}) {
+  const [bidAmount, setBidAmount] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [bids, setBids] = useState<any[]>([])
+  const [lowestBid, setLowestBid] = useState<number>(cycle.winning_bid_amount)
+  const [recentBids, setRecentBids] = useState<any[]>([])
+  const [isMember, setIsMember] = useState(false)
+  const [hasMemberReceived, setHasMemberReceived] = useState(false)
+  
+  const supabase = createClient()
 
-  // Fetch current bids and lowest bid on mount
+  // ✅ NEW: Check if current user is actually a member
+  useEffect(() => {
+    const checkMemberStatus = async () => {
+      const { data: member } = await supabase
+        .from('rosca_members')
+        .select('has_received')
+        .eq('rosca_id', group.id)
+        .eq('user_id', currentUser.id)
+        .single()
+      
+      if (member) {
+        setIsMember(true)
+        setHasMemberReceived(member.has_received)
+      } else {
+        setIsMember(false)
+        setHasMemberReceived(false)
+      }
+    }
+
+    checkMemberStatus()
+  }, [group.id, currentUser.id])
+
   useEffect(() => {
     fetchBids()
-    fetchLowestBid()
-  }, [])
 
-  const fetchLowestBid = async () => {
-    const { data } = await supabase
+    // Real-time subscription for new bids
+    const channel = supabase
+      .channel(`bids-${cycle.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'cycle_bids',
+          filter: `cycle_id=eq.${cycle.id}`
+        },
+        () => {
+          fetchBids()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [cycle.id])
+
+  const fetchBids = async () => {
+    // Fetch lowest bid
+    const { data: lowest } = await supabase
       .from('cycle_bids')
       .select('bid_amount')
       .eq('cycle_id', cycle.id)
@@ -36,160 +80,184 @@ export default function BiddingBox({ cycle, group, currentUser }: any) {
       .limit(1)
       .single()
 
-    if (data) {
-      setCurrentBid(data.bid_amount)
-      setInputValue(data.bid_amount.toString())
+    if (lowest) {
+      setLowestBid(lowest.bid_amount)
+    } else {
+      setLowestBid(cycle.winning_bid_amount)
+    }
+
+    // Fetch recent bids with user profiles
+    const { data: bidsData } = await supabase
+      .from('cycle_bids')
+      .select('id, bid_amount, created_at, user_id')
+      .eq('cycle_id', cycle.id)
+      .order('created_at', { ascending: false })
+      .limit(10)
+
+    if (bidsData) {
+      // Fetch profiles separately
+      const userIds = bidsData.map(b => b.user_id)
+      const { data: profiles } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .in('id', userIds)
+
+      // Combine bids with profiles
+      const bidsWithProfiles = bidsData.map(bid => ({
+        ...bid,
+        profile: profiles?.find(p => p.id === bid.user_id)
+      }))
+
+      setRecentBids(bidsWithProfiles)
     }
   }
 
-const fetchBids = async () => {
-  const { data } = await supabase
-    .from('cycle_bids')
-    .select(`
-      id,
-      bid_amount,
-      created_at,
-      profiles:user_id(full_name, username)
-    `)
-    .eq('cycle_id', cycle.id)
-    .order('bid_amount', { ascending: true })
+  const handlePlaceBid = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
 
-  if (data) {
-    const formattedBids = data.map(bid => ({
-      id: bid.id,
-      bid_amount: bid.bid_amount,
-      username: (bid.profiles as any)?.full_name || (bid.profiles as any)?.username || 'Anonymous',
-      created_at: bid.created_at
-    }))
-    setBids(formattedBids)
-  }
-}
+    const amount = parseFloat(bidAmount)
 
-
-  // Calculate percentage reduction
-  const applyDiscount = (percentage: number) => {
-    const reduction = Math.round(currentBid * (percentage / 100))
-    const newBid = currentBid - reduction
-    setInputValue(newBid.toString())
-  }
-
-  // Submit bid
-  const handleDownBid = async () => {
-    const bidAmount = parseFloat(inputValue)
-    
-    if (isNaN(bidAmount) || bidAmount <= 0) {
-      setError('Invalid bid amount')
+    if (isNaN(amount) || amount <= 0) {
+      setError('Please enter a valid amount')
       return
     }
 
-    if (bidAmount >= currentBid) {
-      setError(`Bid must be lower than ₹${currentBid}`)
+    if (amount >= lowestBid) {
+      setError(`Bid must be lower than ₹${lowestBid.toLocaleString('en-IN')}`)
       return
     }
 
     setLoading(true)
-    setError('')
-
-    const result = await placeBid(cycle.id, bidAmount, group.id)
+    const result = await placeBid(cycle.id, amount, group.id)
+    setLoading(false)
 
     if (result.error) {
       setError(result.error)
     } else {
-      setCurrentBid(bidAmount)
-      setInputValue(bidAmount.toString())
+      setBidAmount('')
       fetchBids()
     }
-
-    setLoading(false)
   }
+
+  // ✅ Check if user is creator/admin (even if not a member)
+  const isCreator = group.created_by === currentUser.id
 
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-      <h3 className="text-lg font-semibold text-gray-900 mb-4">
-        Place Your Bid
-      </h3>
+      <h3 className="text-lg font-semibold text-gray-900 mb-4">🎯 Bidding</h3>
 
       {/* Current Lowest Bid Display */}
-      <div className="bg-blue-50 rounded-lg p-4 mb-4">
-        <p className="text-sm text-gray-600 mb-1">Current Lowest Bid</p>
-        <p className="text-3xl font-bold text-blue-600">
-          ₹{currentBid.toLocaleString('en-IN')}
+      <div className="bg-gradient-to-r from-yellow-50 to-orange-50 border-2 border-yellow-300 rounded-lg p-6 mb-6">
+        <p className="text-sm text-yellow-800 mb-2">Current Lowest Bid</p>
+        <p className="text-4xl font-bold text-yellow-900">
+          ₹{lowestBid.toLocaleString('en-IN')}
+        </p>
+        <p className="text-xs text-yellow-700 mt-2">
+          {recentBids.length > 0 ? `${recentBids.length} bid(s) placed` : 'No bids yet - be the first!'}
         </p>
       </div>
 
-      {/* Bid Input + Discount Buttons */}
-      <div className="space-y-3 mb-4">
-        <input
-          type="number"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder="Enter your bid"
-          className="w-full px-4 py-3 text-lg border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-        />
-
-        {/* Quick Discount Buttons */}
-        <div className="flex gap-2">
-          <button
-            onClick={() => applyDiscount(1)}
-            className="flex-1 px-3 py-2 bg-gray-100 text-gray-700 rounded-lg font-medium hover:bg-gray-200 transition-colors"
-          >
-            -1%
-          </button>
-          <button
-            onClick={() => applyDiscount(2)}
-            className="flex-1 px-3 py-2 bg-gray-100 text-gray-700 rounded-lg font-medium hover:bg-gray-200 transition-colors"
-          >
-            -2%
-          </button>
-          <button
-            onClick={() => applyDiscount(5)}
-            className="flex-1 px-3 py-2 bg-gray-100 text-gray-700 rounded-lg font-medium hover:bg-gray-200 transition-colors"
-          >
-            -5%
-          </button>
+      {/* ✅ NEW: Show different UI for non-member admins */}
+      {!isMember && isCreator ? (
+        <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4 mb-6">
+          <p className="text-sm text-blue-800 font-medium">
+            👁️ Monitoring as banker (non-participant)
+          </p>
+          <p className="text-xs text-blue-700 mt-1">
+            You can view bids but cannot place bids since you're not participating in this cycle.
+          </p>
         </div>
-      </div>
+      ) : !isMember ? (
+        <div className="bg-gray-50 border-2 border-gray-200 rounded-lg p-4 mb-6">
+          <p className="text-sm text-gray-700">
+            You are not a member of this group
+          </p>
+        </div>
+      ) : hasMemberReceived ? (
+        <div className="bg-green-50 border-2 border-green-300 rounded-lg p-4 mb-6">
+          <p className="text-sm text-green-800 font-medium">
+            ✅ You have already received your payout
+          </p>
+          <p className="text-xs text-green-700 mt-1">
+            You cannot bid in future cycles
+          </p>
+        </div>
+      ) : (
+        /* Bidding Form - Only for eligible members */
+        <form onSubmit={handlePlaceBid} className="space-y-4 mb-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Your Bid Amount
+            </label>
+            <div className="relative">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
+              <input
+                type="number"
+                value={bidAmount}
+                onChange={(e) => setBidAmount(e.target.value)}
+                placeholder={`Less than ${lowestBid}`}
+                className="w-full pl-8 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                required
+              />
+            </div>
+            {error && (
+              <p className="text-sm text-red-600 mt-2">{error}</p>
+            )}
+          </div>
 
-      {/* Down Bid Button */}
-      <button
-        onClick={handleDownBid}
-        disabled={loading}
-        className="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
-      >
-        {loading ? 'Placing Bid...' : '⬇️ Down Bid'}
-      </button>
-
-      {error && (
-        <p className="mt-2 text-sm text-red-600">{error}</p>
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-3 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-white font-semibold rounded-lg shadow-md hover:shadow-lg transition-all disabled:opacity-50"
+          >
+            {loading ? 'Placing Bid...' : 'Place Bid'}
+          </button>
+        </form>
       )}
 
-      {/* Bid Queue */}
-      <div className="mt-6">
-        <h4 className="text-sm font-semibold text-gray-700 mb-3">
-          Bid History ({bids.length})
-        </h4>
-        <div className="space-y-2 max-h-64 overflow-y-auto">
-          {bids.map((bid, idx) => (
-            <div 
-              key={bid.id}
-              className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
-            >
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-medium text-gray-500">
-                  #{idx + 1}
-                </span>
-                <span className="font-medium text-gray-900">
-                  {bid.username}
-                </span>
+      {/* Recent Bids */}
+      {recentBids.length > 0 && (
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 mb-3">Recent Bids</h4>
+          <div className="space-y-2 max-h-60 overflow-y-auto">
+            {recentBids.map((bid, index) => (
+              <div
+                key={bid.id}
+                className={`flex items-center justify-between p-3 rounded-lg ${
+                  index === 0
+                    ? 'bg-yellow-100 border-2 border-yellow-300'
+                    : 'bg-gray-50 border border-gray-200'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  {index === 0 && (
+                    <span className="text-xl">🏆</span>
+                  )}
+                  <div>
+                    <p className="font-semibold text-gray-900">
+                      {bid.profile?.full_name || 'Unknown'}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {new Date(bid.created_at).toLocaleString('en-IN', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </p>
+                  </div>
+                </div>
+                <p className={`font-bold ${index === 0 ? 'text-yellow-900' : 'text-gray-700'}`}>
+                  ₹{bid.bid_amount.toLocaleString('en-IN')}
+                </p>
               </div>
-              <span className="text-lg font-bold text-blue-600">
-                ₹{bid.bid_amount.toLocaleString('en-IN')}
-              </span>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
+
 

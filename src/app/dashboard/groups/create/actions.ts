@@ -20,8 +20,11 @@ export async function createGroup(formData: FormData) {
   const frequency = formData.get('frequency') as string
   const totalSlots = formData.get('totalSlots') as string
   const allocationMethod = formData.get('allocationMethod') as string
+  
+  // Get checkbox value ('on' = checked, null = unchecked)
+  const creatorParticipates = formData.get('creatorParticipates') === 'on'
 
-  // Insert group
+  // Insert group with creator_participates flag
   const { data: newGroup, error: insertError } = await supabase
     .from('roscas')
     .insert({
@@ -32,7 +35,8 @@ export async function createGroup(formData: FormData) {
       total_slots: parseInt(totalSlots),
       allocation_method: allocationMethod,
       created_by: user.id,
-      status: 'pending'
+      status: 'pending',
+      creator_participates: creatorParticipates
     })
     .select()
     .single()
@@ -41,14 +45,21 @@ export async function createGroup(formData: FormData) {
     return { error: insertError.message }
   }
 
-  // Add creator as first member
-  await supabase
-    .from('rosca_members')
-    .insert({
-      rosca_id: newGroup.id,
-      user_id: user.id,
-      slot_number: 1
-    })
+  // Only add creator as member if they want to participate
+  if (creatorParticipates) {
+    const { error: memberError } = await supabase
+      .from('rosca_members')
+      .insert({
+        rosca_id: newGroup.id,
+        user_id: user.id,
+        slot_number: 1,
+        has_received: false
+      })
+
+    if (memberError) {
+      return { error: memberError.message }
+    }
+  }
 
   // Revalidate dashboard to show new group
   revalidatePath('/dashboard')
@@ -56,3 +67,5 @@ export async function createGroup(formData: FormData) {
   // Redirect to dashboard
   redirect('/dashboard')
 }
+
+

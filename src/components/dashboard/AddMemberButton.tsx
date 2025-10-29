@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { addMemberToGroup } from '@/app/dashboard/groups/[id]/actions'
+import { addMemberToGroup } from '@/app/dashboard/groups/[id]/cycle-actions'
 
 /**
  * AddMemberButton - Opens modal to add new member to group

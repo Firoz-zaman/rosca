@@ -5,6 +5,7 @@ import MembersList from '@/components/dashboard/MembersList'
 import AddMemberButton from '@/components/dashboard/AddMemberButton'
 import StartCycleButton from '@/components/dashboard/StartCycleButton'
 import CycleManager from '@/components/dashboard/CycleManager'
+import ResetRoscaButton from '@/components/dashboard/ResetRoscaButton'
 
 /**
  * Group Detail Page - Displays full information about a ROSCA group
@@ -39,7 +40,8 @@ export default async function GroupPage({
       allocation_method,
       start_date,
       created_by,
-      created_at
+      created_at,
+      creator_participates
     `)
     .eq('id', id)
     .single()
@@ -118,6 +120,33 @@ export default async function GroupPage({
           availableSlots={availableSlots}
         />
 
+        {/* Creator Participation Status Badge */}
+        {isCreator && (
+          <div className={`rounded-lg p-4 ${
+            group.creator_participates 
+              ? 'bg-green-50 border-2 border-green-300' 
+              : 'bg-blue-50 border-2 border-blue-300'
+          }`}>
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">
+                {group.creator_participates ? '👤' : '🎯'}
+              </span>
+              <div>
+                <p className="font-semibold text-gray-900">
+                  {group.creator_participates 
+                    ? 'You are participating as a member' 
+                    : 'You are managing as banker (non-participant)'}
+                </p>
+                <p className="text-sm text-gray-600 mt-1">
+                  {group.creator_participates
+                    ? 'You will contribute and receive pot like other members'
+                    : 'You manage the group without contributing'}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Active Cycle Manager OR Start Cycle Button */}
         {activeCycle ? (
           <CycleManager
@@ -146,6 +175,45 @@ export default async function GroupPage({
           </div>
         )}
 
+        {/* 🔄 Reset ROSCA Option - Only shows when ALL members have received */}
+        {isCreator && !activeCycle && members && members.length > 0 && (
+          (() => {
+            // ✅ Check if ALL members have received payouts
+            const allMembersReceived = members.every(m => m.has_received)
+            const receivedCount = members.filter(m => m.has_received).length
+            
+            return allMembersReceived ? (
+              <div className="bg-gradient-to-r from-orange-50 to-red-50 border-2 border-orange-300 rounded-lg p-6">
+                <div className="flex items-start gap-4">
+                  <span className="text-4xl">🎉</span>
+                  <div className="flex-1">
+                    <h3 className="text-xl font-bold text-orange-900 mb-2">
+                      ROSCA Cycle Complete!
+                    </h3>
+                    <p className="text-sm text-orange-800 mb-1">
+                      ✅ All {members.length} members have received their payouts
+                    </p>
+                    <p className="text-sm text-orange-700 mb-4">
+                      You can now reset the ROSCA to start a new round where everyone participates again.
+                    </p>
+                    <ResetRoscaButton 
+                      groupId={group.id} 
+                      totalMembers={members.length} 
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              // Optional: Show progress indicator when not all members have received
+              <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
+                <p className="text-sm text-blue-800">
+                  📊 Progress: {receivedCount}/{members.length} members have received payouts
+                </p>
+              </div>
+            )
+          })()
+        )}
+
         {/* Members Section */}
         <div>
           <div className="flex items-center justify-between mb-4">
@@ -169,3 +237,5 @@ export default async function GroupPage({
     </div>
   )
 }
+
+

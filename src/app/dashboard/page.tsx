@@ -19,37 +19,59 @@ export default async function DashboardPage() {
 
   const isAdmin = profile?.role === 'admin'
 
- // FIXED: Remove !inner and add better null handling
-const { data: memberGroups, error: memberError } = await supabase
-  .from('rosca_members')
-  .select(`
-    rosca_id,
-    has_received,
-    roscas (
-      id,
-      name,
-      contribution_amount,
-      frequency,
-      start_date,
-      status,
-      total_slots,
-      allocation_method
-    )
-  `)
-  .eq('user_id', user.id)
+  // ✅ FIXED: Fetch groups where user is a MEMBER
+  const { data: memberGroups, error: memberError } = await supabase
+    .from('rosca_members')
+    .select(`
+      rosca_id,
+      has_received,
+      roscas (
+        id,
+        name,
+        contribution_amount,
+        frequency,
+        start_date,
+        status,
+        total_slots,
+        allocation_method,
+        created_by
+      )
+    `)
+    .eq('user_id', user.id)
 
-console.log('📦 Raw memberGroups:', memberGroups)
+  console.log('📦 Raw memberGroups:', memberGroups)
 
-// FIXED: Filter out null roscas before mapping
-const userGroups = memberGroups
-  ?.filter((g: any) => g.roscas !== null)
-  ?.map((g: any) => ({
-    ...g.roscas,
-    has_received: g.has_received
-  })) || []
+  // Filter out null roscas before mapping
+  const memberGroupsList = memberGroups
+    ?.filter((g: any) => g.roscas !== null)
+    ?.map((g: any) => ({
+      ...g.roscas,
+      has_received: g.has_received,
+      is_member: true
+    })) || []
 
-console.log('✅ Processed userGroups:', userGroups)
+  // ✅ NEW: Also fetch groups where user is CREATOR but NOT a member
+  const memberGroupIds = memberGroupsList.map((g: any) => g.id)
+  
+  const { data: createdGroups } = await supabase
+    .from('roscas')
+    .select('*')
+    .eq('created_by', user.id)
+    .not('id', 'in', memberGroupIds.length > 0 ? `(${memberGroupIds.join(',')})` : '()')
 
+  console.log('👤 Created (non-member) groups:', createdGroups)
+
+  // Combine both lists
+  const userGroups = [
+    ...memberGroupsList,
+    ...(createdGroups?.map((g: any) => ({
+      ...g,
+      has_received: false, // Creator not participating = never receives
+      is_member: false
+    })) || [])
+  ]
+
+  console.log('✅ All userGroups:', userGroups)
 
   // Fetch active cycles for user's groups
   const groupIds = userGroups.map((g: any) => g.id)
@@ -61,8 +83,11 @@ console.log('✅ Processed userGroups:', userGroups)
     .in('status', ['bidding', 'payment', 'overdue'])
     : { data: [] }
 
-  // Fetch user's payment statuses for active cycles
-  const cycleIds = activeCycles?.map((c: any) => c.id) || []
+  // Fetch user's payment statuses for active cycles (only for member groups)
+  const memberGroupIdsList = memberGroupsList.map((g: any) => g.id)
+  const cycleIds = activeCycles
+    ?.filter((c: any) => memberGroupIdsList.includes(c.rosca_id))
+    .map((c: any) => c.id) || []
   
   const { data: userPayments } = cycleIds.length > 0 ? await supabase
     .from('cycle_payments')
@@ -88,6 +113,16 @@ console.log('✅ Processed userGroups:', userGroups)
 
   // Get pending action for each group
   const getGroupAction = (group: any) => {
+    // ✅ NEW: Non-member creators have no actions, just manage
+    if (!group.is_member) {
+      return {
+        type: 'manage',
+        text: 'Manage group',
+        color: 'bg-blue-100 text-blue-700 border-blue-300',
+        urgent: false
+      }
+    }
+
     const cycle = cyclesByRosca.get(group.id)
     if (!cycle) return null
 
@@ -254,6 +289,12 @@ console.log('✅ Processed userGroups:', userGroups)
                         }`}>
                           {group.status}
                         </span>
+                        {/* ✅ NEW: Show banker badge for non-participating creators */}
+                        {!group.is_member && group.created_by === user.id && (
+                          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-blue-100 text-blue-700">
+                            👤 Banker
+                          </span>
+                        )}
                       </div>
 
                       {/* Action Badge */}
@@ -312,6 +353,7 @@ console.log('✅ Processed userGroups:', userGroups)
     </div>
   )
 }
+
 
 
 

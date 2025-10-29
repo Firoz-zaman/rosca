@@ -38,6 +38,7 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
           </svg>
           <span>Back</span>
         </button>
+
         <h2 className="text-2xl font-bold text-slate-900 mb-1">
           Create New Group
         </h2>
@@ -46,9 +47,11 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
 
       {/* Form */}
       <form onSubmit={handleSubmit} className="space-y-5">
+        
+        {/* Group Name */}
         <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
           <label className="block text-sm font-semibold text-slate-700 mb-2">
-            Group Name *
+            Group Name
           </label>
           <input
             type="text"
@@ -59,6 +62,7 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
           />
         </div>
 
+        {/* Description */}
         <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
           <label className="block text-sm font-semibold text-slate-700 mb-2">
             Description
@@ -71,9 +75,10 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
           />
         </div>
 
+        {/* Contribution Amount */}
         <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
           <label className="block text-sm font-semibold text-slate-700 mb-2">
-            Contribution Amount (₹) *
+            Contribution Amount
           </label>
           <input
             type="number"
@@ -84,9 +89,10 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
           />
         </div>
 
+        {/* Frequency */}
         <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
           <label className="block text-sm font-semibold text-slate-700 mb-2">
-            Frequency *
+            Frequency
           </label>
           <select
             name="frequency"
@@ -98,9 +104,10 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
           </select>
         </div>
 
+        {/* Total Members */}
         <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
           <label className="block text-sm font-semibold text-slate-700 mb-2">
-            Total Members *
+            Total Members
           </label>
           <input
             type="number"
@@ -112,9 +119,10 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
           />
         </div>
 
+        {/* Allocation Method */}
         <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
           <label className="block text-sm font-semibold text-slate-700 mb-2">
-            Allocation Method *
+            Allocation Method
           </label>
           <select
             name="allocationMethod"
@@ -126,11 +134,31 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
           </select>
         </div>
 
+        {/* ✅ NEW: Creator Participation Toggle */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+          <label className="flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              name="creatorParticipates"
+              defaultChecked={true}
+              className="w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+            />
+            <div className="ml-3">
+              <span className="block text-sm font-semibold text-slate-700">
+                I want to participate as a member
+              </span>
+              <span className="block text-xs text-slate-500 mt-1">
+                Unchecked: You'll only manage the group without contributing or receiving the pot
+              </span>
+            </div>
+          </label>
+        </div>
+
         {/* Submit Button */}
         <button
           type="submit"
           disabled={loading}
-          className="w-full py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-blue-400 disabled:to-purple-400 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-[1.02] disabled:transform-none disabled:cursor-not-allowed"
+          className="w-full py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-blue-400 disabled:to-purple-400 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-1.02 disabled:transform-none disabled:cursor-not-allowed"
         >
           {loading ? (
             <span className="flex items-center justify-center gap-2">
@@ -148,3 +176,4 @@ export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
     </div>
   )
 }
+
