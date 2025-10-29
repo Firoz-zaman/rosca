@@ -274,6 +274,10 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
     .eq('id', groupId)
     .single()
 
+  if (!group) {
+    return { error: 'Group not found' }
+  }
+
   const { data: profile } = await supabase
     .from('profiles')
     .select('role')
@@ -281,13 +285,14 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
     .single()
 
   const isAdmin = profile?.role === 'admin'
-  const isCreator = group?.created_by === user.id
+  const isCreator = group.created_by === user.id
 
   if (!isAdmin && !isCreator) {
     return { error: 'Only admin or creator can end bidding' }
   }
 
-  if (group?.allocation_method === 'bidding') {
+  if (group.allocation_method === 'bidding') {
+
     // Find lowest bid
     const { data: bids } = await supabase
       .from('cycle_bids')
