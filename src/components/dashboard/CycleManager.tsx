@@ -185,11 +185,13 @@ export default function CycleManager({
           {activeTab === 'payment' && showPayment && (
             <div className="space-y-4">
               {/* Payment Tracker for regular members */}
-              <PaymentTracker 
-                cycle={cycle}
-                currentUser={currentUser}
-                isReceiver={isReceiver}
-              />
+                <PaymentTracker 
+                  cycle={cycle}
+                  currentUser={currentUser}
+                  isReceiver={isReceiver}
+                  group={group}  // ← ADD THIS
+                />
+
 
               {/* Verification Panel for receiver */}
               {isReceiver && !isOverdue && (

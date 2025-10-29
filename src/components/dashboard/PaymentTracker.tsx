@@ -12,14 +12,21 @@ import { createClient } from '@/lib/supabase/client'
 export default function PaymentTracker({ 
   cycle, 
   currentUser, 
-  isReceiver 
+  isReceiver,
+  group  // ← ADD THIS
 }: any) {
+
   const [payment, setPayment] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const supabase = createClient()
 
-  useEffect(() => {
-    fetchPaymentStatus()
+useEffect(() => {
+  console.log('🔄 PaymentTracker mounted. Cycle:', cycle)
+  console.log('👤 Current user:', currentUser)
+  console.log('🏢 Group:', group)
+  fetchPaymentStatus()
+  // ... rest of existing code
+
     
     // Real-time subscription for payment updates
     const channel = supabase
@@ -43,25 +50,40 @@ export default function PaymentTracker({
     }
   }, [cycle.id])
 
-  const fetchPaymentStatus = async () => {
-    const { data } = await supabase
-      .from('cycle_payments')
-      .select(`
-        *,
-        member:rosca_members!inner(user_id)
-      `)
-      .eq('cycle_id', cycle.id)
-      .eq('member.user_id', currentUser.id)
-      .single()
+const fetchPaymentStatus = async () => {
+  // Step 1: Get current user's member record
+  const { data: member } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', cycle.rosca_id)
+    .eq('user_id', currentUser.id)
+    .single()
 
-    setPayment(data)
+  if (!member) {
+    setPayment(null)
+    return
   }
 
-  const handleMarkPaid = async () => {
-    setLoading(true)
-    await markPaymentMade(cycle.id, cycle.rosca_id)
-    setLoading(false)
-  }
+  // Step 2: Get payment record using member_id
+  const { data } = await supabase
+    .from('cycle_payments')
+    .select('*')
+    .eq('cycle_id', cycle.id)
+    .eq('member_id', member.id)
+    .single()
+
+  setPayment(data)
+}
+
+
+const handleMarkPaid = async () => {
+  console.log('🔘 Button clicked! Cycle:', cycle.id, 'Rosca:', cycle.rosca_id)
+  setLoading(true)
+  const result = await markPaymentMade(cycle.id, cycle.rosca_id)
+  console.log('📥 Result from markPaymentMade:', result)
+  setLoading(false)
+}
+
 
   if (isReceiver) {
     return (
@@ -91,8 +113,9 @@ export default function PaymentTracker({
         <div className="space-y-4">
           <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
             <p className="text-sm text-yellow-800 mb-3">
-              💰 Please send ₹{cycle.winning_bid_amount?.toLocaleString('en-IN')} to the receiver
+              💰 Please send ₹{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-IN')} to the receiver
             </p>
+
             <button
               onClick={handleMarkPaid}
               disabled={loading || payment?.has_paid}
