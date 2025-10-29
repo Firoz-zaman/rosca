@@ -262,8 +262,12 @@ export async function startBiddingPhase(cycleId: string, groupId: string) {
  * Admin/Creator manually ends bidding
  */
 export async function endBiddingPhase(cycleId: string, groupId: string) {
+  console.log('🔥 endBiddingPhase called with:', { cycleId, groupId })  // ADD THIS
+  
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
+  
+  console.log('👤 User:', user?.id)  // ADD THIS
   
   if (!user) {
     return { error: 'Not authenticated' }
@@ -274,6 +278,9 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
     .select('created_by, allocation_method')
     .eq('id', groupId)
     .single()
+
+  console.log('📦 Group:', group)  // ADD THIS
+
 
   const { data: profile } = await supabase
     .from('profiles')
@@ -326,10 +333,16 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       .eq('user_id', winningBid.user_id)
 
     // FIXED: Create payment records if they don't exist
+    // FIXED: Create payment records if they don't exist
+    console.log('💳 Checking for existing payments...')  // ADD THIS
+    
     const { data: existingPayments } = await supabase
       .from('cycle_payments')
       .select('id')
       .eq('cycle_id', cycleId)
+    
+    console.log('💳 Existing payments:', existingPayments)  // ADD THIS
+
 
     if (!existingPayments || existingPayments.length === 0) {
       const { data: members } = await supabase

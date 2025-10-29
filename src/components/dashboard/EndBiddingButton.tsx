@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { endBiddingPhase } from '@/app/dashboard/groups/[id]/actions'
+import { endBiddingPhase } from '@/app/dashboard/groups/[id]/cycle-actions'
 
 export default function EndBiddingButton({ 
   cycleId, 

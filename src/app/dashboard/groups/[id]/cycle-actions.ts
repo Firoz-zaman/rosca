@@ -94,13 +94,388 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
 }
 
 /**
+ * Start a new cycle (creates cycle in 'pending' status)
+ */
+export async function startNewCycle(groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('*')
+    .eq('id', groupId)
+    .single()
+
+  if (!group) {
+    return { error: 'Group not found' }
+  }
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only group creator or admin can start cycles' }
+  }
+
+  // Check if there's already an active cycle
+  const { data: activeCycle } = await supabase
+    .from('payment_cycles')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .in('status', ['pending', 'bidding', 'payment', 'overdue'])
+    .single()
+
+  if (activeCycle) {
+    return { error: 'There is already an active cycle. Complete it first.' }
+  }
+
+  const { count: cycleCount } = await supabase
+    .from('payment_cycles')
+    .select('id', { count: 'exact', head: true })
+    .eq('rosca_id', groupId)
+
+  const nextCycleNumber = (cycleCount || 0) + 1
+  const totalAmount = group.contribution_amount * group.total_slots
+
+  // Create cycle in 'pending' status
+  const { data: cycle, error: cycleError } = await supabase
+    .from('payment_cycles')
+    .insert({
+      rosca_id: groupId,
+      cycle_number: nextCycleNumber,
+      status: 'pending',
+      bidding_start_date: null,
+      bidding_end_date: null,
+      payment_deadline_date: null,
+      cycle_end_date: null,
+      winning_bid_amount: totalAmount
+    })
+    .select()
+    .single()
+
+  if (cycleError) {
+    return { error: 'Failed to create cycle: ' + cycleError.message }
+  }
+
+  // Create payment records for all members
+  const { data: members } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+
+  if (members && members.length > 0) {
+    await supabase
+      .from('cycle_payments')
+      .insert(
+        members.map((member) => ({
+          cycle_id: cycle.id,
+          member_id: member.id,
+          has_paid: false,
+          verified_by_receiver: false,
+          verified_by_admin: false
+        }))
+      )
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycle.id,
+      activity_type: 'cycle_created',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true, cycleNumber: nextCycleNumber }
+}
+
+/**
+ * Start Bidding Phase
+ */
+export async function startBiddingPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can start bidding' }
+  }
+
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'bidding',
+      bidding_start_date: new Date().toISOString()
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to start bidding: ' + updateError.message }
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'bidding_opened',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * End Bidding Phase and Select Winner
+ * FIXED: Creates payment records if they don't exist
+ */
+export async function endBiddingPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by, allocation_method')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can end bidding' }
+  }
+
+  if (group?.allocation_method === 'bidding') {
+    // Find lowest bid
+    const { data: bids } = await supabase
+      .from('cycle_bids')
+      .select('*')
+      .eq('cycle_id', cycleId)
+      .order('bid_amount', { ascending: true })
+      .limit(1)
+
+    if (!bids || bids.length === 0) {
+      return { error: 'No bids placed yet. Cannot end bidding.' }
+    }
+
+    const winningBid = bids[0]
+
+    // Update cycle with winner
+    const { error: updateError } = await supabase
+      .from('payment_cycles')
+      .update({
+        status: 'payment',
+        bidding_end_date: new Date().toISOString(),
+        winner_id: winningBid.user_id,
+        winning_bid_amount: winningBid.bid_amount
+      })
+      .eq('id', cycleId)
+
+    if (updateError) {
+      return { error: 'Failed to end bidding: ' + updateError.message }
+    }
+
+    // Mark winner as having received
+    await supabase
+      .from('rosca_members')
+      .update({ has_received: true })
+      .eq('rosca_id', groupId)
+      .eq('user_id', winningBid.user_id)
+
+    // FIXED: Create payment records if they don't exist
+    const { data: existingPayments } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+
+    if (!existingPayments || existingPayments.length === 0) {
+      const { data: members } = await supabase
+        .from('rosca_members')
+        .select('id')
+        .eq('rosca_id', groupId)
+
+      if (members && members.length > 0) {
+        await supabase
+          .from('cycle_payments')
+          .insert(
+            members.map((member) => ({
+              cycle_id: cycleId,
+              member_id: member.id,
+              has_paid: false,
+              verified_by_receiver: false,
+              verified_by_admin: false
+            }))
+          )
+      }
+    }
+
+    // Log activity
+    await supabase
+      .from('cycle_activities')
+      .insert({
+        cycle_id: cycleId,
+        activity_type: 'bidding_closed',
+        user_id: user.id,
+        metadata: { winner_id: winningBid.user_id, amount: winningBid.bid_amount }
+      })
+  } else {
+    // Random/Sequential allocation
+    const { error: updateError } = await supabase
+      .from('payment_cycles')
+      .update({
+        status: 'payment',
+        bidding_end_date: new Date().toISOString()
+      })
+      .eq('id', cycleId)
+
+    if (updateError) {
+      return { error: 'Failed to start payment phase: ' + updateError.message }
+    }
+
+    // FIXED: Create payment records if they don't exist
+    const { data: existingPayments } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+
+    if (!existingPayments || existingPayments.length === 0) {
+      const { data: members } = await supabase
+        .from('rosca_members')
+        .select('id')
+        .eq('rosca_id', groupId)
+
+      if (members && members.length > 0) {
+        await supabase
+          .from('cycle_payments')
+          .insert(
+            members.map((member) => ({
+              cycle_id: cycleId,
+              member_id: member.id,
+              has_paid: false,
+              verified_by_receiver: false,
+              verified_by_admin: false
+            }))
+          )
+      }
+    }
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * End Payment Collection Phase
+ */
+export async function endPaymentPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can end payment phase' }
+  }
+
+  const { count: unpaidCount } = await supabase
+    .from('cycle_payments')
+    .select('*', { count: 'exact' })
+    .eq('cycle_id', cycleId)
+    .eq('verified_by_receiver', false)
+
+  if (unpaidCount && unpaidCount > 0) {
+    return { 
+      error: `${unpaidCount} payment(s) not yet verified. Verify all payments before ending cycle.`,
+      unpaidCount 
+    }
+  }
+
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'completed',
+      cycle_end_date: new Date().toISOString()
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to complete cycle: ' + updateError.message }
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'cycle_completed',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
  * Place a bid in the current cycle
- * 
- * Validations:
- * - User is a member of the group
- * - User hasn't received payout yet (has_received = false)
- * - Cycle is in 'bidding' status
- * - Bid amount is lower than current lowest bid
  */
 export async function placeBid(cycleId: string, bidAmount: number, roscaId: string) {
   const supabase = await createClient()
@@ -110,7 +485,6 @@ export async function placeBid(cycleId: string, bidAmount: number, roscaId: stri
     return { error: 'Not authenticated' }
   }
 
-  // 1. Check if user is member and hasn't received payout
   const { data: member } = await supabase
     .from('rosca_members')
     .select('id, has_received')
@@ -126,7 +500,6 @@ export async function placeBid(cycleId: string, bidAmount: number, roscaId: stri
     return { error: 'You have already received payout and cannot bid again' }
   }
 
-  // 2. Check cycle status
   const { data: cycle } = await supabase
     .from('payment_cycles')
     .select('status, winning_bid_amount')
@@ -137,7 +510,6 @@ export async function placeBid(cycleId: string, bidAmount: number, roscaId: stri
     return { error: 'Bidding is not active for this cycle' }
   }
 
-  // 3. Get current lowest bid
   const { data: lowestBid } = await supabase
     .from('cycle_bids')
     .select('bid_amount')
@@ -148,12 +520,10 @@ export async function placeBid(cycleId: string, bidAmount: number, roscaId: stri
 
   const currentLowest = lowestBid?.bid_amount || cycle.winning_bid_amount
 
-  // 4. Validate bid is lower
   if (bidAmount >= currentLowest) {
     return { error: `Bid must be lower than current lowest (₹${currentLowest})` }
   }
 
-  // 5. Insert bid
   const { error: bidError } = await supabase
     .from('cycle_bids')
     .insert({
@@ -166,7 +536,6 @@ export async function placeBid(cycleId: string, bidAmount: number, roscaId: stri
     return { error: 'Failed to place bid' }
   }
 
-  // 6. Create activity log
   await supabase
     .from('cycle_activities')
     .insert({
@@ -191,7 +560,6 @@ export async function markPaymentMade(cycleId: string, roscaId: string) {
     return { error: 'Not authenticated' }
   }
 
-  // Find user's payment record
   const { data: member } = await supabase
     .from('rosca_members')
     .select('id')
@@ -203,7 +571,6 @@ export async function markPaymentMade(cycleId: string, roscaId: string) {
     return { error: 'Not a member' }
   }
 
-  // Update payment status
   const { error } = await supabase
     .from('cycle_payments')
     .update({
@@ -217,7 +584,6 @@ export async function markPaymentMade(cycleId: string, roscaId: string) {
     return { error: 'Failed to mark payment' }
   }
 
-  // Log activity
   await supabase
     .from('cycle_activities')
     .insert({
@@ -231,7 +597,7 @@ export async function markPaymentMade(cycleId: string, roscaId: string) {
 }
 
 /**
- * Verify payment as receiver (winner of current cycle)
+ * Verify payment as receiver
  */
 export async function verifyPayment(
   cycleId: string, 
@@ -245,7 +611,6 @@ export async function verifyPayment(
     return { error: 'Not authenticated' }
   }
 
-  // Check if current user is the winner of this cycle
   const { data: cycle } = await supabase
     .from('payment_cycles')
     .select('winner_id')
@@ -256,7 +621,6 @@ export async function verifyPayment(
     return { error: 'Only the payout receiver can verify payments' }
   }
 
-  // Verify payment
   const { error } = await supabase
     .from('cycle_payments')
     .update({
@@ -270,7 +634,6 @@ export async function verifyPayment(
     return { error: 'Failed to verify payment' }
   }
 
-  // Log activity
   await supabase
     .from('cycle_activities')
     .insert({
@@ -299,7 +662,6 @@ export async function adminVerifyPayment(
     return { error: 'Not authenticated' }
   }
 
-  // Check if user is admin
   const { data: profile } = await supabase
     .from('profiles')
     .select('role')
@@ -310,7 +672,6 @@ export async function adminVerifyPayment(
     return { error: 'Admin access required' }
   }
 
-  // Verify payment
   const { error } = await supabase
     .from('cycle_payments')
     .update({
@@ -325,7 +686,6 @@ export async function adminVerifyPayment(
     return { error: 'Failed to verify payment' }
   }
 
-  // Log activity
   await supabase
     .from('cycle_activities')
     .insert({

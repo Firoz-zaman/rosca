@@ -37,7 +37,7 @@ export default function Header({ user, isAdmin }: HeaderProps) {  // 👈 ADD is
               </svg>
             </button>
             <h1 className="text-lg font-bold text-slate-900">
-              Chitfund
+              ROSCA
             </h1>
           </div>
 

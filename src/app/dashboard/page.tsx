@@ -163,7 +163,7 @@ console.log('✅ Processed userGroups:', userGroups)
           Welcome back, {user.user_metadata?.full_name?.split(' ')[0] || 'User'}! 👋
         </h2>
         <p className="text-slate-600">
-          Manage your chitfund groups
+          Manage your ROSCA groups
           {isAdmin && (
             <span className="ml-2 px-2 py-1 bg-purple-100 text-purple-700 text-xs font-semibold rounded-full">
               Admin
