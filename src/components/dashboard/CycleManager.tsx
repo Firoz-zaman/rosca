@@ -8,7 +8,7 @@ import VerificationPanel from './VerificationPanel'
 import AdminOverduePanel from './AdminOverduePanel'
 import StartBiddingButton from './StartBiddingButton'
 import EndBiddingButton from './EndBiddingButton'
-import EndPaymentButton from './EndpaymentButton.tsx'
+import EndPaymentButton from './EndpaymentButton'
 
 /**
  * CycleManager - Main container for current cycle
