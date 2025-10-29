@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { endPaymentPhase } from '@/app/dashboard/groups/[id]/actions'
+import { endPaymentPhase } from '@/app/dashboard/groups/[id]/cycle-actions'
 
 export default function EndPaymentButton({ 
   cycleId, 

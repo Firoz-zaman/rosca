@@ -329,6 +329,27 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       .eq('rosca_id', groupId)
       .eq('user_id', winningBid.user_id)
 
+    // Auto-verify winner's own payment
+    const { data: winnerMember } = await supabase
+      .from('rosca_members')
+      .select('id')
+      .eq('rosca_id', groupId)
+      .eq('user_id', winningBid.user_id)
+      .single()
+
+    if (winnerMember) {
+      await supabase
+        .from('cycle_payments')
+        .update({
+          has_paid: true,
+          paid_at: new Date().toISOString(),
+          verified_by_receiver: true,
+          receiver_verified_at: new Date().toISOString()
+        })
+        .eq('cycle_id', cycleId)
+        .eq('member_id', winnerMember.id)
+    }
+
     // Create payment records if they don't exist
     const { data: existingPayments } = await supabase
       .from('cycle_payments')
@@ -418,6 +439,26 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       .update({ has_received: true })
       .eq('id', selectedWinner.id)
 
+    // Auto-verify winner's own payment
+    const { data: winnerPayment } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+      .eq('member_id', selectedWinner.id)
+      .single()
+
+    if (winnerPayment) {
+      await supabase
+        .from('cycle_payments')
+        .update({
+          has_paid: true,
+          paid_at: new Date().toISOString(),
+          verified_by_receiver: true,
+          receiver_verified_at: new Date().toISOString()
+        })
+        .eq('id', winnerPayment.id)
+    }
+
     // Step 6: Create payment records if they don't exist
     const { data: existingPayments } = await supabase
       .from('cycle_payments')
@@ -495,13 +536,37 @@ export async function endPaymentPhase(cycleId: string, groupId: string) {
     return { error: 'Only admin or creator can end payment phase' }
   }
 
-  const { count: unpaidCount } = await supabase
+  // Get cycle winner
+  const { data: cycleData } = await supabase
+    .from('payment_cycles')
+    .select('winner_id')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycleData?.winner_id) {
+    return { error: 'Cycle winner not found' }
+  }
+
+  // Get winner's member_id
+  const { data: winnerMember } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .eq('user_id', cycleData.winner_id)
+    .single()
+
+  // Get all unverified payments
+  const { data: allPayments } = await supabase
     .from('cycle_payments')
-    .select('*', { count: 'exact' })
+    .select('*')
     .eq('cycle_id', cycleId)
     .eq('verified_by_receiver', false)
 
-  if (unpaidCount && unpaidCount > 0) {
+  // Filter out winner's payment in JavaScript
+  const unpaidPayments = allPayments?.filter(p => p.member_id !== winnerMember?.id) || []
+  const unpaidCount = unpaidPayments.length
+
+  if (unpaidCount > 0) {
     return { 
       error: `${unpaidCount} payment(s) not yet verified. Verify all payments before ending cycle.`,
       unpaidCount 
@@ -646,7 +711,7 @@ export async function markPaymentMade(cycleId: string, roscaId: string) {
     })
     .eq('cycle_id', cycleId)
     .eq('member_id', member.id)
-    .select()  // ← ADD THIS to see what was updated
+    .select()
 
   console.log('✅ Update result:', updateData, 'Error:', error)
 
@@ -666,7 +731,6 @@ export async function markPaymentMade(cycleId: string, roscaId: string) {
   revalidatePath(`/dashboard/groups/${roscaId}`)
   return { success: true }
 }
-
 
 /**
  * Verify payment as receiver
@@ -770,5 +834,6 @@ export async function adminVerifyPayment(
   revalidatePath(`/dashboard/groups/${roscaId}`)
   return { success: true }
 }
+
 
 

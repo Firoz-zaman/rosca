@@ -98,7 +98,7 @@ console.log('✅ Processed userGroups:', userGroups)
     if (cycle.status === 'bidding' && !group.has_received && group.allocation_method === 'bidding') {
       return {
         type: 'bid',
-        text: '⬇️ Place your bid',
+        text: 'Place your bid',
         color: 'bg-purple-100 text-purple-700 border-purple-300',
         urgent: true
       }
@@ -108,7 +108,7 @@ console.log('✅ Processed userGroups:', userGroups)
     if ((cycle.status === 'payment' || cycle.status === 'overdue') && !isReceiver && !payment?.has_paid) {
       return {
         type: 'pay',
-        text: '💰 Payment pending',
+        text: 'Payment pending',
         color: 'bg-red-100 text-red-700 border-red-300',
         urgent: true
       }
@@ -118,7 +118,7 @@ console.log('✅ Processed userGroups:', userGroups)
     if (cycle.status === 'payment' && isReceiver) {
       return {
         type: 'verify',
-        text: '✓ Verify payments',
+        text: 'Verify payments',
         color: 'bg-blue-100 text-blue-700 border-blue-300',
         urgent: false
       }
@@ -128,7 +128,7 @@ console.log('✅ Processed userGroups:', userGroups)
     if (payment?.has_paid && !payment?.verified_by_receiver) {
       return {
         type: 'waiting',
-        text: '⏳ Awaiting verification',
+        text: 'Awaiting verification',
         color: 'bg-yellow-100 text-yellow-700 border-yellow-300',
         urgent: false
       }
@@ -138,7 +138,7 @@ console.log('✅ Processed userGroups:', userGroups)
     if (payment?.verified_by_receiver) {
       return {
         type: 'verified',
-        text: '✓ Payment verified',
+        text: 'Payment verified',
         color: 'bg-green-100 text-green-700 border-green-300',
         urgent: false
       }

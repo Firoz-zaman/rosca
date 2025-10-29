@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { placeBid } from '@/app/dashboard/groups/[id]/cycle-actions'
+import { createClient } from '@/lib/supabase/client'
 
 /**
  * BiddingBox - Interactive bidding interface
@@ -12,6 +13,7 @@ import { placeBid } from '@/app/dashboard/groups/[id]/cycle-actions'
  * - Live bid queue showing all bids
  */
 export default function BiddingBox({ cycle, group, currentUser }: any) {
+  const supabase = createClient()
   const totalAmount = group.contribution_amount * group.total_slots
   const [currentBid, setCurrentBid] = useState(totalAmount)
   const [inputValue, setInputValue] = useState(totalAmount.toString())
@@ -19,14 +21,48 @@ export default function BiddingBox({ cycle, group, currentUser }: any) {
   const [error, setError] = useState('')
   const [bids, setBids] = useState<any[]>([])
 
-  // Fetch current bids
+  // Fetch current bids and lowest bid on mount
   useEffect(() => {
     fetchBids()
+    fetchLowestBid()
   }, [])
 
+  const fetchLowestBid = async () => {
+    const { data } = await supabase
+      .from('cycle_bids')
+      .select('bid_amount')
+      .eq('cycle_id', cycle.id)
+      .order('bid_amount', { ascending: true })
+      .limit(1)
+      .single()
+
+    if (data) {
+      setCurrentBid(data.bid_amount)
+      setInputValue(data.bid_amount.toString())
+    }
+  }
+
   const fetchBids = async () => {
-    // Fetch bids from Supabase
-    // TODO: Implement real-time subscription for live updates
+    const { data } = await supabase
+      .from('cycle_bids')
+      .select(`
+        id,
+        bid_amount,
+        created_at,
+        profiles!cycle_bids_user_id_fkey(full_name, username)
+      `)
+      .eq('cycle_id', cycle.id)
+      .order('bid_amount', { ascending: true })
+
+    if (data) {
+      const formattedBids = data.map(bid => ({
+        id: bid.id,
+        bid_amount: bid.bid_amount,
+        username: bid.profiles?.full_name || bid.profiles?.username || 'Anonymous',
+        created_at: bid.created_at
+      }))
+      setBids(formattedBids)
+    }
   }
 
   // Calculate percentage reduction
@@ -59,6 +95,7 @@ export default function BiddingBox({ cycle, group, currentUser }: any) {
       setError(result.error)
     } else {
       setCurrentBid(bidAmount)
+      setInputValue(bidAmount.toString())
       fetchBids()
     }
 
@@ -154,3 +191,4 @@ export default function BiddingBox({ cycle, group, currentUser }: any) {
     </div>
   )
 }
+

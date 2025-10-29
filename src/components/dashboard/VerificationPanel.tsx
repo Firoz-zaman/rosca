@@ -27,48 +27,47 @@ export default function VerificationPanel({
     }
   }, [isOpen])
 
-const fetchPayments = async () => {
-  // Fetch payments with basic member info
-  const { data: paymentsData } = await supabase
-    .from('cycle_payments')
-    .select(`
-      *,
-      member:rosca_members!inner(
-        id,
-        user_id,
-        slot_number
-      )
-    `)
-    .eq('cycle_id', cycle.id)
+  const fetchPayments = async () => {
+    // Fetch payments with basic member info
+    const { data: paymentsData } = await supabase
+      .from('cycle_payments')
+      .select(`
+        *,
+        member:rosca_members!inner(
+          id,
+          user_id,
+          slot_number
+        )
+      `)
+      .eq('cycle_id', cycle.id)
 
-  console.log('📦 Raw payments data:', paymentsData)  // ← ADD THIS
+    console.log('📦 Raw payments data:', paymentsData)  // ← Your debug log
 
-  // Fetch all member profiles separately
-  const memberIds = paymentsData?.map(p => p.member.user_id) || []
-  const { data: profiles } = await supabase
-    .from('profiles')
-    .select('id, full_name, username, email')
-    .in('id', memberIds)
+    // Fetch all member profiles separately
+    const memberIds = paymentsData?.map(p => p.member.user_id) || []
+    const { data: profiles } = await supabase
+      .from('profiles')
+      .select('id, full_name, username, email')
+      .in('id', memberIds)
 
-  console.log('👥 Profiles data:', profiles)  // ← ADD THIS
+    console.log('👥 Profiles data:', profiles)  // ← Your debug log
 
-  // Combine payments with profiles
-  const paymentsWithProfiles = paymentsData?.map(payment => ({
-    ...payment,
-    member: {
-      ...payment.member,
-      profiles: profiles?.find(p => p.id === payment.member.user_id) || null
-    }
-  }))
+    // Combine payments with profiles
+    const paymentsWithProfiles = paymentsData?.map(payment => ({
+      ...payment,
+      member: {
+        ...payment.member,
+        profiles: profiles?.find(p => p.id === payment.member.user_id) || null
+      }
+    }))
 
-  // Sort by slot number
-  paymentsWithProfiles?.sort((a, b) => a.member.slot_number - b.member.slot_number)
+    // Sort by slot number
+    paymentsWithProfiles?.sort((a, b) => a.member.slot_number - b.member.slot_number)
 
-  console.log('✅ Final payments with profiles:', paymentsWithProfiles)  // ← ADD THIS
+    console.log('✅ Final payments with profiles:', paymentsWithProfiles)  // ← Your debug log
 
-  setPayments(paymentsWithProfiles || [])
-}
-
+    setPayments(paymentsWithProfiles || [])
+  }
 
   const handleVerify = async (memberId: string) => {
     setLoading(memberId)
@@ -77,8 +76,11 @@ const fetchPayments = async () => {
     setLoading(null)
   }
 
-  const paidCount = payments.filter(p => p.has_paid).length
-  const verifiedCount = payments.filter(p => p.verified_by_receiver).length
+  // Filter out the receiver (winner) from counts
+  const payingMembers = payments.filter(p => p.member.user_id !== cycle.winner_id)
+  const paidCount = payingMembers.filter(p => p.has_paid).length
+  const verifiedCount = payingMembers.filter(p => p.verified_by_receiver).length
+  const totalPaying = payingMembers.length
 
   return (
     <>
@@ -90,14 +92,14 @@ const fetchPayments = async () => {
               Payment Verification
             </h3>
             <p className="text-sm text-gray-600 mt-1">
-              {verifiedCount}/{payments.length} payments verified
+              {verifiedCount}/{totalPaying} payments verified
             </p>
           </div>
           <div className="text-right">
             <p className="text-3xl font-bold text-blue-600">
-              {paidCount}/{payments.length}
+              {paidCount}/{totalPaying}
             </p>
-            <p className="text-xs text-gray-500">Marked Paid</p>
+            <p className="text-xs text-gray-500">Members Paid</p>
           </div>
         </div>
 
@@ -133,7 +135,7 @@ const fetchPayments = async () => {
 
             {/* Payment List */}
             <div className="p-6 space-y-3 overflow-y-auto max-h-[60vh]">
-              {payments.map((payment) => {
+              {payingMembers.map((payment) => {
                 const member = payment.member
                 const isVerified = payment.verified_by_receiver
                 const hasPaid = payment.has_paid
@@ -205,3 +207,4 @@ const fetchPayments = async () => {
     </>
   )
 }
+
