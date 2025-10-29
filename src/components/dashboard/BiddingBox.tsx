@@ -42,28 +42,29 @@ export default function BiddingBox({ cycle, group, currentUser }: any) {
     }
   }
 
-  const fetchBids = async () => {
-    const { data } = await supabase
-      .from('cycle_bids')
-      .select(`
-        id,
-        bid_amount,
-        created_at,
-        profiles!cycle_bids_user_id_fkey(full_name, username)
-      `)
-      .eq('cycle_id', cycle.id)
-      .order('bid_amount', { ascending: true })
+const fetchBids = async () => {
+  const { data } = await supabase
+    .from('cycle_bids')
+    .select(`
+      id,
+      bid_amount,
+      created_at,
+      profiles:user_id(full_name, username)
+    `)
+    .eq('cycle_id', cycle.id)
+    .order('bid_amount', { ascending: true })
 
-    if (data) {
-      const formattedBids = data.map(bid => ({
-        id: bid.id,
-        bid_amount: bid.bid_amount,
-        username: bid.profiles?.full_name || bid.profiles?.username || 'Anonymous',
-        created_at: bid.created_at
-      }))
-      setBids(formattedBids)
-    }
+  if (data) {
+    const formattedBids = data.map(bid => ({
+      id: bid.id,
+      bid_amount: bid.bid_amount,
+      username: (bid.profiles as any)?.full_name || (bid.profiles as any)?.username || 'Anonymous',
+      created_at: bid.created_at
+    }))
+    setBids(formattedBids)
   }
+}
+
 
   // Calculate percentage reduction
   const applyDiscount = (percentage: number) => {
