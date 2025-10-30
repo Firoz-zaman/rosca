@@ -195,12 +195,14 @@ export default function CycleManager({
               )}
 
               {/* ✅ NEW: Display Payment Details to Other Members */}
-              {!isReceiver && isMember && !(!group.creatorparticipates && isCreator) && (
+              {!isReceiver && isMember && (
+
                 <PaymentDetailsDisplay cycle={cycle} />
               )}
 
               {/* ✅ FIXED: Payment Tracker - Only for actual members who are participants */}
-              {isMember && !(!group.creatorparticipates && isCreator) && (
+              {isMember && (
+
                 <PaymentTracker
                   cycle={cycle}
                   currentUser={currentUser}

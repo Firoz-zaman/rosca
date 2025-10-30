@@ -1,9 +1,11 @@
 @import "tailwindcss";
 
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
 }
+
 
 /* Tailwind v4 syntax - commented out for v3 compatibility
 @theme inline {
@@ -14,6 +16,7 @@
 }
 */
 
+
 /* Use :root instead for Tailwind v3 */
 :root {
   --color-background: var(--background);
@@ -23,6 +26,7 @@
 }
 
 
+
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
@@ -30,11 +34,13 @@
   }
 }
 
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
 
 @keyframes slideDown {
   from {
@@ -47,7 +53,33 @@ body {
   }
 }
 
+
 .animate-slideDown {
   animation: slideDown 0.3s ease-out;
 }
+
+
+/* ============================================
+   Input & Form Styles - Dark Text Only
+   ============================================ */
+
+/* Make input TEXT black/dark - keep backgrounds white */
+input[type="text"],
+input[type="email"],
+input[type="tel"],
+input[type="number"],
+input[type="password"],
+input[type="search"],
+input[type="url"],
+textarea,
+select {
+  color: rgb(17, 24, 39) !important; /* gray-900 - dark text */
+}
+
+/* Placeholder text should remain light gray for contrast */
+input::placeholder,
+textarea::placeholder {
+  color: rgb(156, 163, 175) !important; /* gray-400 - light gray */
+}
+
 

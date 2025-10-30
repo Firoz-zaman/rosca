@@ -92,11 +92,13 @@ GroupDetails.tsx
 Header.tsx
 MembersList.tsx
 MobileMenu.tsx
+PaymentDetailsDisplay.tsx
 PaymentTracker.tsx
 ResetRoscaButton.tsx
 StartBiddingButton.tsx
 StartCycleButton.tsx
 VerificationPanel.tsx
+WinnerPaymentDetailsForm.tsx
 
 src/components/ui:
 Alert.tsx
@@ -1012,15 +1014,20 @@ export default async function GroupPage({
   const currentMember = members?.find(m => m.user_id === user.id)
   const hasMemberReceived = currentMember?.has_received || false
 
-  // Fetch active cycle
-  const { data: activeCycle } = await supabase
-    .from('payment_cycles')
-    .select('*')
-    .eq('rosca_id', id)
-    .in('status', ['pending','bidding', 'payment', 'overdue'])
-    .order('cycle_number', { ascending: false })
-    .limit(1)
-    .single()
+
+// Fetch active cycle
+const { data: activeCycle } = await supabase
+  .from('payment_cycles')
+  .select(`
+    *,
+    winner:winner_id(id, email, full_name)
+  `)
+  .eq('rosca_id', id)
+  .in('status', ['pending','bidding', 'payment', 'overdue'])
+  .order('cycle_number', { ascending: false })
+  .limit(1)
+  .single()
+
 
   const isReceiver = activeCycle?.winner_id === user.id
 
@@ -1257,7 +1264,8 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
 
 /**
  * Start a new cycle (creates cycle in 'pending' status)
- * FIXED: Validates minimum 2 members before starting
+ * ✅ FIXED: Validates minimum 2 members before starting
+ * ✅ FIXED: Blocks starting when all members have won
  */
 export async function startNewCycle(groupId: string) {
   const supabase = await createClient()
@@ -1298,6 +1306,18 @@ export async function startNewCycle(groupId: string) {
 
   if (!memberCount || memberCount < 2) {
     return { error: 'Need at least 2 members to start a cycle. Add more members first.' }
+  }
+
+  // ✅ NEW: Check if ALL members have already received (ROSCA complete)
+  const { data: allMembers } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+
+  const allHaveReceived = allMembers?.every(m => m.has_received === true)
+
+  if (allHaveReceived) {
+    return { error: 'All members have received payouts. Please reset the ROSCA to start a new round.' }
   }
 
   // Check if there's already an active cycle
@@ -1378,6 +1398,10 @@ export async function startNewCycle(groupId: string) {
 /**
  * Start Bidding Phase
  */
+/**
+ * Start Bidding Phase
+ * ✅ FIXED: Auto-selects if only 1 eligible member (skips bidding entirely)
+ */
 export async function startBiddingPhase(cycleId: string, groupId: string) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -1405,6 +1429,25 @@ export async function startBiddingPhase(cycleId: string, groupId: string) {
     return { error: 'Only admin or creator can start bidding' }
   }
 
+  // ✅ NEW: Check eligible members count BEFORE starting bidding
+  const { data: eligibleMembers } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .eq('has_received', false)
+
+  if (!eligibleMembers || eligibleMembers.length === 0) {
+    return { error: 'No eligible members remaining' }
+  }
+
+  // ✅ NEW: If only 1 eligible member, skip bidding and auto-select immediately
+  if (eligibleMembers.length === 1) {
+    console.log('⚡ Only 1 eligible member - skipping bidding phase, auto-selecting winner...')
+    // Call endBiddingPhase which handles auto-selection
+    return endBiddingPhase(cycleId, groupId)
+  }
+
+  // Normal flow: Multiple eligible members - start bidding
   const { error: updateError } = await supabase
     .from('payment_cycles')
     .update({
@@ -1430,10 +1473,18 @@ export async function startBiddingPhase(cycleId: string, groupId: string) {
   return { success: true }
 }
 
+
 /**
  * End Bidding Phase and Select Winner
- * FIXED: Sets has_received flag for winner
- * FIXED: Uses actual member count for pot calculation
+ * ✅ FIXED: Auto-selects last eligible member if only 1 remains (final round)
+ * ✅ FIXED: Sets has_received flag for winner
+ * ✅ FIXED: Uses actual member count for pot calculation
+ */
+/**
+ * End Bidding Phase and Select Winner
+ * ✅ FIXED: Auto-selects last eligible member if only 1 remains (final round)
+ * ✅ FIXED: Sets has_received flag for winner CORRECTLY
+ * ✅ FIXED: Uses member.id instead of user_id for updates
  */
 export async function endBiddingPhase(cycleId: string, groupId: string) {
   const supabase = await createClient()
@@ -1466,14 +1517,138 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
     return { error: 'Only admin or creator can end bidding' }
   }
 
-  // ✅ Get actual member count for pot calculation
+  // Get actual member count for pot calculation
   const { count: memberCount } = await supabase
     .from('rosca_members')
     .select('id', { count: 'exact', head: true })
     .eq('rosca_id', groupId)
 
-  if (group.allocation_method === 'bidding') {
+  // ✅ Check eligible members count (members who haven't received yet)
+  const { data: eligibleMembers } = await supabase
+    .from('rosca_members')
+    .select('id, user_id, slot_number')
+    .eq('rosca_id', groupId)
+    .eq('has_received', false)
 
+  if (!eligibleMembers || eligibleMembers.length === 0) {
+    return { error: 'No eligible members remaining for payout' }
+  }
+
+  // ✅ If only 1 eligible member left, auto-select them (FINAL ROUND)
+// ✅ If only 1 eligible member left, auto-select them (FINAL ROUND)
+if (eligibleMembers.length === 1) {
+  const finalWinner = eligibleMembers[0]
+  const totalAmount = group.contribution_amount * (memberCount || 0)
+
+  console.log('🎯 AUTO-SELECT - Final Winner:', {
+    memberId: finalWinner.id,
+    userId: finalWinner.user_id,
+    slotNumber: finalWinner.slot_number
+  })
+
+  // Update cycle with auto-selected winner
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'payment',
+      bidding_end_date: new Date().toISOString(),
+      winner_id: finalWinner.user_id,
+      winning_bid_amount: totalAmount,
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: `Failed to select final winner: ${updateError.message}` }
+  }
+
+  // ✅ FIXED: Mark winner as having received (using member ID)
+  console.log('🏆 Attempting to mark winner as has_received...')
+  console.log('🏆 Update query: member_id =', finalWinner.id)
+  
+  const { error: memberError, data: updatedMember } = await supabase
+    .from('rosca_members')
+    .update({ has_received: true })
+    .eq('id', finalWinner.id)
+    .select()
+
+  console.log('🏆 Update result:', {
+    error: memberError,
+    updatedMember,
+    rowsAffected: updatedMember?.length || 0
+  })
+
+  if (memberError) {
+    console.error('❌ Error marking winner:', memberError)
+  } else if (!updatedMember || updatedMember.length === 0) {
+    console.error('❌ NO ROWS UPDATED - member ID might be wrong!')
+  } else {
+    console.log('✅ Winner marked successfully:', updatedMember[0])
+  }
+
+  // Auto-verify winner's own payment
+  const { data: winnerPayment } = await supabase
+    .from('cycle_payments')
+    .select('id')
+    .eq('cycle_id', cycleId)
+    .eq('member_id', finalWinner.id)
+    .single()
+
+  if (winnerPayment) {
+    await supabase
+      .from('cycle_payments')
+      .update({
+        has_paid: true,
+        paid_at: new Date().toISOString(),
+        verified_by_receiver: true,
+        receiver_verified_at: new Date().toISOString(),
+      })
+      .eq('id', winnerPayment.id)
+  }
+
+  // Create payment records if they don't exist
+  const { data: existingPayments } = await supabase
+    .from('cycle_payments')
+    .select('id')
+    .eq('cycle_id', cycleId)
+
+  if (!existingPayments || existingPayments.length === 0) {
+    const { data: members } = await supabase
+      .from('rosca_members')
+      .select('id')
+      .eq('rosca_id', groupId)
+
+    if (members && members.length > 0) {
+      await supabase.from('cycle_payments').insert(
+        members.map((member) => ({
+          cycle_id: cycleId,
+          member_id: member.id,
+          has_paid: false,
+          verified_by_receiver: false,
+          verified_by_admin: false,
+        }))
+      )
+    }
+  }
+
+  // Log activity
+  await supabase.from('cycle_activities').insert({
+    cycle_id: cycleId,
+    activity_type: 'winner_declared',
+    user_id: user.id,
+    metadata: {
+      winner_id: finalWinner.user_id,
+      method: 'auto_final_round',
+      amount: totalAmount,
+      note: 'Last eligible member - auto-selected',
+    },
+  })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  return { success: true, autoSelected: true, message: 'Final member auto-selected as winner!' }
+}
+
+  // ✅ NORMAL FLOW: Multiple eligible members remain
+  if (group.allocation_method === 'bidding') {
     // Find lowest bid
     const { data: bids } = await supabase
       .from('cycle_bids')
@@ -1503,14 +1678,7 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       return { error: 'Failed to end bidding: ' + updateError.message }
     }
 
-    // ✅ FIXED: Mark winner as having received
-    await supabase
-      .from('rosca_members')
-      .update({ has_received: true })
-      .eq('rosca_id', groupId)
-      .eq('user_id', winningBid.user_id)
-
-    // Auto-verify winner's own payment
+    // ✅ FIXED: Get the winner member first, then update using member ID
     const { data: winnerMember } = await supabase
       .from('rosca_members')
       .select('id')
@@ -1519,6 +1687,17 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       .single()
 
     if (winnerMember) {
+      // ✅ FIXED: Mark winner as having received (using member ID)
+      const { error: memberError } = await supabase
+        .from('rosca_members')
+        .update({ has_received: true })
+        .eq('id', winnerMember.id)  // ✅ Use member.id
+
+      if (memberError) {
+        console.error('Error marking winner:', memberError)
+      }
+
+      // Auto-verify winner's own payment
       await supabase
         .from('cycle_payments')
         .update({
@@ -1568,20 +1747,7 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
         metadata: { winner_id: winningBid.user_id, amount: winningBid.bid_amount }
       })
   } else {
-    // Random/Banker allocation
-    
-    // Step 1: Get members who haven't received yet
-    const { data: eligibleMembers } = await supabase
-      .from('rosca_members')
-      .select('id, user_id, slot_number')
-      .eq('rosca_id', groupId)
-      .eq('has_received', false)
-
-    if (!eligibleMembers || eligibleMembers.length === 0) {
-      return { error: 'No eligible members remaining for payout' }
-    }
-
-    // Step 2: Select winner based on allocation method
+    // Random/Banker allocation - Select winner based on allocation method
     let selectedWinner
     
     if (group.allocation_method === 'random') {
@@ -1596,10 +1762,10 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       selectedWinner = eligibleMembers.sort((a, b) => a.slot_number - b.slot_number)[0]
     }
 
-    // ✅ FIXED: Calculate total amount using actual member count
+    // Calculate total amount using actual member count
     const totalAmount = group.contribution_amount * (memberCount || 0)
 
-    // Step 4: Update cycle with winner
+    // Update cycle with winner
     const { error: updateError } = await supabase
       .from('payment_cycles')
       .update({
@@ -1614,11 +1780,15 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       return { error: 'Failed to start payment phase: ' + updateError.message }
     }
 
-    // ✅ FIXED: Mark winner as having received
-    await supabase
+    // ✅ FIXED: Mark winner as having received (using member ID)
+    const { error: memberError } = await supabase
       .from('rosca_members')
       .update({ has_received: true })
-      .eq('id', selectedWinner.id)
+      .eq('id', selectedWinner.id)  // ✅ Use member.id
+
+    if (memberError) {
+      console.error('Error marking winner:', memberError)
+    }
 
     // Auto-verify winner's own payment
     const { data: winnerPayment } = await supabase
@@ -1640,7 +1810,7 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
         .eq('id', winnerPayment.id)
     }
 
-    // Step 6: Create payment records if they don't exist
+    // Create payment records if they don't exist
     const { data: existingPayments } = await supabase
       .from('cycle_payments')
       .select('id')
@@ -1667,25 +1837,25 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       }
     }
 
-    // Step 7: Log activity
+    // Log activity
     await supabase
       .from('cycle_activities')
       .insert({
         cycle_id: cycleId,
-        activity_type: 'winner_selected',
+        activity_type: 'winner_declared',
         user_id: user.id,
-        metadata: { 
-          winner_id: selectedWinner.user_id, 
+        metadata: {
+          winner_id: selectedWinner.user_id,
           method: group.allocation_method,
-          amount: totalAmount 
-        }
+          amount: totalAmount,
+        },
       })
   }
 
   revalidatePath(`/dashboard/groups/${groupId}`)
-  
   return { success: true }
 }
+
 
 /**
  * End Payment Collection Phase
@@ -2016,7 +2186,6 @@ export async function adminVerifyPayment(
   return { success: true }
 }
 
-
 /**
  * Reset ROSCA - Clear all has_received flags to start fresh
  * Only creator/admin can do this when ALL members have received
@@ -2049,7 +2218,7 @@ export async function resetRosca(groupId: string) {
     return { error: 'Only group creator or admin can reset ROSCA' }
   }
 
-  // ✅ Check if there are any active cycles
+  // Check if there are any active cycles
   const { data: activeCycles } = await supabase
     .from('payment_cycles')
     .select('id')
@@ -2060,7 +2229,7 @@ export async function resetRosca(groupId: string) {
     return { error: 'Cannot reset while there are active cycles. Complete all cycles first.' }
   }
 
-  // ✅ Verify ALL members have received before allowing reset
+  // Verify ALL members have received before allowing reset
   const { data: members } = await supabase
     .from('rosca_members')
     .select('has_received')
@@ -2086,6 +2255,81 @@ export async function resetRosca(groupId: string) {
   
   return { success: true }
 }
+
+
+
+
+/**
+ * Save winner's payment details for current cycle
+ * Only the winner can update their payment details
+ */
+export async function saveWinnerPaymentDetails(
+  cycleId: string,
+  groupId: string,
+  paymentData: {
+    methodType: 'UPI' | 'Bank' | 'Crypto' | 'PayPal' | 'Cash' | 'Other'
+    details: Record<string, any>
+    instructions?: string
+  }
+) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Verify user is the winner of this cycle
+  const { data: cycle } = await supabase
+    .from('payment_cycles')
+    .select('winner_id, status')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycle) {
+    return { error: 'Cycle not found' }
+  }
+
+  if (cycle.winner_id !== user.id) {
+    return { error: 'Only the cycle winner can set payment details' }
+  }
+
+  if (cycle.status !== 'payment' && cycle.status !== 'overdue') {
+    return { error: 'Payment details can only be set during payment phase' }
+  }
+
+  // Update payment details
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      payment_method_type: paymentData.methodType,
+      payment_details: paymentData.details,
+      payment_instructions: paymentData.instructions || null,
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to save payment details: ' + updateError.message }
+  }
+
+  // Log activity
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'payment_details_updated',
+      user_id: user.id,
+      metadata: {
+        method_type: paymentData.methodType,
+      }
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+
 
 
 
@@ -3644,10 +3888,12 @@ export default function HomePage() {
 
 @import "tailwindcss";
 
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
 }
+
 
 /* Tailwind v4 syntax - commented out for v3 compatibility
 @theme inline {
@@ -3658,6 +3904,7 @@ export default function HomePage() {
 }
 */
 
+
 /* Use :root instead for Tailwind v3 */
 :root {
   --color-background: var(--background);
@@ -3667,6 +3914,7 @@ export default function HomePage() {
 }
 
 
+
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
@@ -3674,11 +3922,13 @@ export default function HomePage() {
   }
 }
 
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
 
 @keyframes slideDown {
   from {
@@ -3691,9 +3941,35 @@ body {
   }
 }
 
+
 .animate-slideDown {
   animation: slideDown 0.3s ease-out;
 }
+
+
+/* ============================================
+   Input & Form Styles - Dark Text Only
+   ============================================ */
+
+/* Make input TEXT black/dark - keep backgrounds white */
+input[type="text"],
+input[type="email"],
+input[type="tel"],
+input[type="number"],
+input[type="password"],
+input[type="search"],
+input[type="url"],
+textarea,
+select {
+  color: rgb(17, 24, 39) !important; /* gray-900 - dark text */
+}
+
+/* Placeholder text should remain light gray for contrast */
+input::placeholder,
+textarea::placeholder {
+  color: rgb(156, 163, 175) !important; /* gray-400 - light gray */
+}
+
 
 -e 
 
@@ -3886,6 +4162,419 @@ export async function createClient() {
         },
       },
     }
+  )
+}
+-e 
+
+##### FILE: src/components/dashboard/WinnerPaymentDetailsForm.tsx
+
+'use client'
+
+import { useState } from 'react'
+import { saveWinnerPaymentDetails } from '@/app/dashboard/groups/[id]/cycle-actions'
+
+interface WinnerPaymentDetailsFormProps {
+  cycle: any
+  groupId: string
+}
+
+type PaymentMethodType = 'UPI' | 'Bank' | 'Crypto' | 'PayPal' | 'Cash' | 'Other'
+
+export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPaymentDetailsFormProps) {
+  const [methodType, setMethodType] = useState<PaymentMethodType>(
+    cycle.payment_method_type || 'UPI'
+  )
+  const [instructions, setInstructions] = useState(cycle.payment_instructions || '')
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
+
+  // UPI fields
+  const [upiId, setUpiId] = useState(cycle.payment_details?.upi_id || '')
+  const [upiPhone, setUpiPhone] = useState(cycle.payment_details?.phone || '')
+
+  // Bank fields
+  const [accountNumber, setAccountNumber] = useState(cycle.payment_details?.account_number || '')
+  const [ifsc, setIfsc] = useState(cycle.payment_details?.ifsc || '')
+  const [bankName, setBankName] = useState(cycle.payment_details?.bank_name || '')
+  const [accountName, setAccountName] = useState(cycle.payment_details?.account_name || '')
+
+  // Crypto fields
+  const [cryptoCurrency, setCryptoCurrency] = useState(cycle.payment_details?.currency || 'USDT')
+  const [cryptoNetwork, setCryptoNetwork] = useState(cycle.payment_details?.network || 'TRC20')
+  const [cryptoAddress, setCryptoAddress] = useState(cycle.payment_details?.address || '')
+
+  // PayPal fields
+  const [paypalEmail, setPaypalEmail] = useState(cycle.payment_details?.email || '')
+
+  // Cash fields
+  const [cashLocation, setCashLocation] = useState(cycle.payment_details?.location || '')
+  const [cashContact, setCashContact] = useState(cycle.payment_details?.contact || '')
+
+  // Other fields
+  const [otherMethod, setOtherMethod] = useState(cycle.payment_details?.method || '')
+  const [otherDetails, setOtherDetails] = useState(cycle.payment_details?.details || '')
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    setMessage(null)
+
+    let details: Record<string, any> = {}
+
+    // Build details object based on method type
+    switch (methodType) {
+      case 'UPI':
+        details = {
+          upi_id: upiId.trim(),
+          phone: upiPhone.trim(),
+        }
+        break
+      case 'Bank':
+        details = {
+          account_number: accountNumber.trim(),
+          ifsc: ifsc.trim(),
+          bank_name: bankName.trim(),
+          account_name: accountName.trim(),
+        }
+        break
+      case 'Crypto':
+        details = {
+          currency: cryptoCurrency,
+          network: cryptoNetwork,
+          address: cryptoAddress.trim(),
+        }
+        break
+      case 'PayPal':
+        details = {
+          email: paypalEmail.trim(),
+        }
+        break
+      case 'Cash':
+        details = {
+          location: cashLocation.trim(),
+          contact: cashContact.trim(),
+        }
+        break
+      case 'Other':
+        details = {
+          method: otherMethod.trim(),
+          details: otherDetails.trim(),
+        }
+        break
+    }
+
+    const result = await saveWinnerPaymentDetails(cycle.id, groupId, {
+      methodType,
+      details,
+      instructions: instructions.trim(),
+    })
+
+    setLoading(false)
+
+    if (result.error) {
+      setMessage({ type: 'error', text: result.error })
+    } else {
+      setMessage({ type: 'success', text: 'Payment details saved successfully!' })
+    }
+  }
+
+  const renderMethodFields = () => {
+    switch (methodType) {
+      case 'UPI':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                UPI ID <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={upiId}
+                onChange={(e) => setUpiId(e.target.value)}
+                placeholder="yourname@paytm or yourname@oksbi"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Phone Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="tel"
+                value={upiPhone}
+                onChange={(e) => setUpiPhone(e.target.value)}
+                placeholder="9876543210"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+              <p className="text-xs text-gray-500 mt-1">For PhonePe, Google Pay, Paytm, etc.</p>
+            </div>
+          </>
+        )
+
+      case 'Bank':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Account Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={accountNumber}
+                onChange={(e) => setAccountNumber(e.target.value)}
+                placeholder="1234567890"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                IFSC Code / Routing Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={ifsc}
+                onChange={(e) => setIfsc(e.target.value)}
+                placeholder="SBIN0001234"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Bank Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={bankName}
+                onChange={(e) => setBankName(e.target.value)}
+                placeholder="State Bank of India"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Account Holder Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={accountName}
+                onChange={(e) => setAccountName(e.target.value)}
+                placeholder="John Doe"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+          </>
+        )
+
+      case 'Crypto':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Currency <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={cryptoCurrency}
+                onChange={(e) => setCryptoCurrency(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              >
+                <option value="USDT">USDT (Tether)</option>
+                <option value="BTC">Bitcoin (BTC)</option>
+                <option value="ETH">Ethereum (ETH)</option>
+                <option value="USDC">USDC</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Network <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={cryptoNetwork}
+                onChange={(e) => setCryptoNetwork(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              >
+                <option value="TRC20">TRC20 (Tron)</option>
+                <option value="ERC20">ERC20 (Ethereum)</option>
+                <option value="BEP20">BEP20 (BSC)</option>
+                <option value="Bitcoin">Bitcoin Network</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Wallet Address <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={cryptoAddress}
+                onChange={(e) => setCryptoAddress(e.target.value)}
+                placeholder="TXyz123..."
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+              <p className="text-xs text-red-500 mt-1">⚠️ Double-check address - crypto transfers are irreversible!</p>
+            </div>
+          </>
+        )
+
+      case 'PayPal':
+        return (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              PayPal Email <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="email"
+              value={paypalEmail}
+              onChange={(e) => setPaypalEmail(e.target.value)}
+              placeholder="john@example.com"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              required
+            />
+          </div>
+        )
+
+      case 'Cash':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Collection Location <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={cashLocation}
+                onChange={(e) => setCashLocation(e.target.value)}
+                placeholder="Office lobby, Coffee shop, etc."
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Contact Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="tel"
+                value={cashContact}
+                onChange={(e) => setCashContact(e.target.value)}
+                placeholder="9876543210"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+          </>
+        )
+
+      case 'Other':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Payment Method Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={otherMethod}
+                onChange={(e) => setOtherMethod(e.target.value)}
+                placeholder="Venmo, Zelle, Cash App, etc."
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Payment Details <span className="text-red-500">*</span>
+              </label>
+              <textarea
+                value={otherDetails}
+                onChange={(e) => setOtherDetails(e.target.value)}
+                placeholder="@username, account ID, or other relevant details"
+                rows={3}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+          </>
+        )
+    }
+  }
+
+  return (
+    <div className="bg-green-50 border-2 border-green-300 rounded-lg p-6">
+      <div className="flex items-center gap-3 mb-4">
+        <span className="text-2xl">🏆</span>
+        <div>
+          <h3 className="text-lg font-bold text-green-900">You're the Winner of Cycle {cycle.cycle_number}!</h3>
+          <p className="text-sm text-green-700">
+            Provide your payment details so members know where to send ₹{cycle.winning_bid_amount?.toLocaleString('en-IN')}
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Payment Method Selector */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Payment Method <span className="text-red-500">*</span>
+          </label>
+          <select
+            value={methodType}
+            onChange={(e) => setMethodType(e.target.value as PaymentMethodType)}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            required
+          >
+            <option value="UPI">UPI (Google Pay, PhonePe, Paytm)</option>
+            <option value="Bank">Bank Transfer</option>
+            <option value="Crypto">Cryptocurrency</option>
+            <option value="PayPal">PayPal</option>
+            <option value="Cash">Cash (In Person)</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+
+        {/* Dynamic Fields Based on Method */}
+        {renderMethodFields()}
+
+        {/* Additional Instructions */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Additional Instructions (Optional)
+          </label>
+          <textarea
+            value={instructions}
+            onChange={(e) => setInstructions(e.target.value)}
+            placeholder='e.g., "Please add ROSCA-Cycle7 in payment remarks"'
+            rows={2}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+          />
+        </div>
+
+        {/* Submit Button */}
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loading ? 'Saving...' : cycle.payment_method_type ? 'Update Payment Details' : 'Save Payment Details'}
+        </button>
+
+        {/* Message */}
+        {message && (
+          <div className={`p-3 rounded-lg text-sm ${
+            message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+          }`}>
+            {message.text}
+          </div>
+        )}
+      </form>
+    </div>
   )
 }
 -e 
@@ -5126,6 +5815,8 @@ import AdminOverduePanel from './AdminOverduePanel'
 import StartBiddingButton from './StartBiddingButton'
 import EndBiddingButton from './EndBiddingButton'
 import EndPaymentButton from './EndpaymentButton'
+import WinnerPaymentDetailsForm from './WinnerPaymentDetailsForm'
+import PaymentDetailsDisplay from './PaymentDetailsDisplay'
 
 /**
  * CycleManager - Main container for current cycle
@@ -5304,8 +5995,18 @@ export default function CycleManager({
           {/* Payment Tab */}
           {activeTab === 'payment' && showPayment && (
             <div className="space-y-4">
-              {/* ✅ FIXED: Payment Tracker - Only for actual members */}
-              {isMember && (
+              {/* ✅ NEW: Winner Payment Details Form - Only show to winner */}
+              {isReceiver && (
+                <WinnerPaymentDetailsForm cycle={cycle} groupId={group.id} />
+              )}
+
+              {/* ✅ NEW: Display Payment Details to Other Members */}
+              {!isReceiver && isMember && !(!group.creatorparticipates && isCreator) && (
+                <PaymentDetailsDisplay cycle={cycle} />
+              )}
+
+              {/* ✅ FIXED: Payment Tracker - Only for actual members who are participants */}
+              {isMember && !(!group.creatorparticipates && isCreator) && (
                 <PaymentTracker
                   cycle={cycle}
                   currentUser={currentUser}
@@ -5338,10 +6039,15 @@ export default function CycleManager({
                       </p>
                     </div>
                   </div>
+
+                  {/* Show payment details to admin */}
+                  <PaymentDetailsDisplay cycle={cycle} />
                   
                   {/* Allow admin to verify payments even if not participating */}
                   {!isOverdue && (
-                    <VerificationPanel cycle={cycle} groupId={group.id} />
+                    <div className="mt-4">
+                      <VerificationPanel cycle={cycle} groupId={group.id} />
+                    </div>
                   )}
                 </div>
               )}
@@ -5354,6 +6060,203 @@ export default function CycleManager({
 }
 
 
+
+
+
+-e 
+
+##### FILE: src/components/dashboard/PaymentDetailsDisplay.tsx
+
+'use client'
+
+import { useState } from 'react'
+
+interface PaymentDetailsDisplayProps {
+  cycle: any
+}
+
+export default function PaymentDetailsDisplay({ cycle }: PaymentDetailsDisplayProps) {
+  const [copiedField, setCopiedField] = useState<string | null>(null)
+
+  const copyToClipboard = async (text: string, fieldName: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedField(fieldName)
+      setTimeout(() => setCopiedField(null), 2000) // Reset after 2 seconds
+    } catch (err) {
+      console.error('Failed to copy:', err)
+    }
+  }
+
+  if (!cycle.payment_method_type || !cycle.payment_details) {
+    return (
+      <div className="bg-yellow-50 border-2 border-yellow-300 rounded-lg p-6">
+        <p className="text-yellow-800 font-medium">⏳ Waiting for winner to provide payment details...</p>
+      </div>
+    )
+  }
+
+  const renderCopyButton = (text: string, fieldName: string) => (
+    <button
+      onClick={() => copyToClipboard(text, fieldName)}
+      className="ml-2 px-3 py-1 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors flex items-center gap-1"
+    >
+      {copiedField === fieldName ? (
+        <>
+          <span>✓</span> Copied
+        </>
+      ) : (
+        <>
+          <span>📋</span> Copy
+        </>
+      )}
+    </button>
+  )
+
+  const renderDetails = () => {
+    const details = cycle.payment_details
+
+    switch (cycle.payment_method_type) {
+      case 'UPI':
+        return (
+          <>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">UPI ID</p>
+              <div className="flex items-center justify-between">
+                <p className="text-lg font-mono text-blue-900">{details.upi_id}</p>
+                {renderCopyButton(details.upi_id, 'upi')}
+              </div>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Phone Number</p>
+              <div className="flex items-center justify-between">
+                <p className="text-lg font-mono text-blue-900">{details.phone}</p>
+                {renderCopyButton(details.phone, 'phone')}
+              </div>
+            </div>
+            <p className="text-sm text-gray-600">💡 Use Google Pay, PhonePe, Paytm, or any UPI app</p>
+          </>
+        )
+
+      case 'Bank':
+        return (
+          <>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Account Number</p>
+              <div className="flex items-center justify-between">
+                <p className="text-lg font-mono text-blue-900">{details.account_number}</p>
+                {renderCopyButton(details.account_number, 'account')}
+              </div>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">IFSC / Routing</p>
+              <div className="flex items-center justify-between">
+                <p className="text-lg font-mono text-blue-900">{details.ifsc}</p>
+                {renderCopyButton(details.ifsc, 'ifsc')}
+              </div>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Bank Name</p>
+              <p className="text-lg text-blue-900">{details.bank_name}</p>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Account Holder</p>
+              <p className="text-lg text-blue-900">{details.account_name}</p>
+            </div>
+          </>
+        )
+
+      case 'Crypto':
+        return (
+          <>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Currency & Network</p>
+              <p className="text-lg text-blue-900">{details.currency} ({details.network})</p>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Wallet Address</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-mono text-blue-900 break-all flex-1">{details.address}</p>
+                {renderCopyButton(details.address, 'crypto')}
+              </div>
+            </div>
+            <p className="text-sm text-red-600">⚠️ Double-check address before sending - crypto transfers are irreversible!</p>
+          </>
+        )
+
+      case 'PayPal':
+        return (
+          <div className="bg-white rounded-lg p-4 border border-blue-200">
+            <p className="text-sm font-medium text-gray-600 mb-2">PayPal Email</p>
+            <div className="flex items-center justify-between">
+              <p className="text-lg font-mono text-blue-900">{details.email}</p>
+              {renderCopyButton(details.email, 'paypal')}
+            </div>
+          </div>
+        )
+
+      case 'Cash':
+        return (
+          <>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Collection Location</p>
+              <p className="text-lg text-blue-900">{details.location}</p>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Contact Number</p>
+              <div className="flex items-center justify-between">
+                <p className="text-lg font-mono text-blue-900">{details.contact}</p>
+                {renderCopyButton(details.contact, 'contact')}
+              </div>
+            </div>
+            <p className="text-sm text-gray-600">💵 Collect and pay in cash at the specified location</p>
+          </>
+        )
+
+      case 'Other':
+        return (
+          <>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Method</p>
+              <p className="text-lg text-blue-900">{details.method}</p>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-blue-200">
+              <p className="text-sm font-medium text-gray-600 mb-2">Details</p>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-lg text-blue-900 whitespace-pre-wrap flex-1">{details.details}</p>
+                {renderCopyButton(details.details, 'other')}
+              </div>
+            </div>
+          </>
+        )
+    }
+  }
+
+  return (
+    <div className="bg-blue-50 border-2 border-blue-300 rounded-lg p-6">
+      <h4 className="text-lg font-bold text-blue-900 mb-4 flex items-center gap-2">
+        <span>💳</span> Payment Details - Send to Winner
+      </h4>
+      
+      <div className="space-y-3">
+        {renderDetails()}
+
+        {cycle.payment_instructions && (
+          <div className="bg-white rounded-lg p-4 border border-blue-200 mt-4">
+            <p className="text-sm font-medium text-gray-600 mb-1">📝 Instructions from Winner</p>
+            <p className="text-sm text-gray-800 whitespace-pre-wrap">{cycle.payment_instructions}</p>
+          </div>
+        )}
+
+        <div className="bg-blue-100 rounded-lg p-3 mt-4">
+          <p className="text-sm text-blue-800">
+            <strong>Amount to Send:</strong> ₹{cycle.winning_bid_amount?.toLocaleString('en-IN')}
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 -e 
 
