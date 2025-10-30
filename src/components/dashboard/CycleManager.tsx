@@ -187,8 +187,8 @@ export default function CycleManager({
           {/* Payment Tab */}
           {activeTab === 'payment' && showPayment && (
             <div className="space-y-4">
-              {/* ✅ FIXED: Payment Tracker - Only for actual members */}
-              {isMember && (
+              {/* ✅ FIXED: Payment Tracker - Only for actual members who are participants */}
+              {isMember && !(!group.creatorparticipates && isCreator) && (
                 <PaymentTracker
                   cycle={cycle}
                   currentUser={currentUser}
@@ -235,6 +235,7 @@ export default function CycleManager({
     </div>
   )
 }
+  
 
 
 

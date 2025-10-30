@@ -95,7 +95,8 @@ export async function addMemberToGroup(groupId: string, memberEmail: string) {
 
 /**
  * Start a new cycle (creates cycle in 'pending' status)
- * FIXED: Validates minimum 2 members before starting
+ * ✅ FIXED: Validates minimum 2 members before starting
+ * ✅ FIXED: Blocks starting when all members have won
  */
 export async function startNewCycle(groupId: string) {
   const supabase = await createClient()
@@ -136,6 +137,18 @@ export async function startNewCycle(groupId: string) {
 
   if (!memberCount || memberCount < 2) {
     return { error: 'Need at least 2 members to start a cycle. Add more members first.' }
+  }
+
+  // ✅ NEW: Check if ALL members have already received (ROSCA complete)
+  const { data: allMembers } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+
+  const allHaveReceived = allMembers?.every(m => m.has_received === true)
+
+  if (allHaveReceived) {
+    return { error: 'All members have received payouts. Please reset the ROSCA to start a new round.' }
   }
 
   // Check if there's already an active cycle
@@ -216,6 +229,10 @@ export async function startNewCycle(groupId: string) {
 /**
  * Start Bidding Phase
  */
+/**
+ * Start Bidding Phase
+ * ✅ FIXED: Auto-selects if only 1 eligible member (skips bidding entirely)
+ */
 export async function startBiddingPhase(cycleId: string, groupId: string) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -243,6 +260,25 @@ export async function startBiddingPhase(cycleId: string, groupId: string) {
     return { error: 'Only admin or creator can start bidding' }
   }
 
+  // ✅ NEW: Check eligible members count BEFORE starting bidding
+  const { data: eligibleMembers } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .eq('has_received', false)
+
+  if (!eligibleMembers || eligibleMembers.length === 0) {
+    return { error: 'No eligible members remaining' }
+  }
+
+  // ✅ NEW: If only 1 eligible member, skip bidding and auto-select immediately
+  if (eligibleMembers.length === 1) {
+    console.log('⚡ Only 1 eligible member - skipping bidding phase, auto-selecting winner...')
+    // Call endBiddingPhase which handles auto-selection
+    return endBiddingPhase(cycleId, groupId)
+  }
+
+  // Normal flow: Multiple eligible members - start bidding
   const { error: updateError } = await supabase
     .from('payment_cycles')
     .update({
@@ -268,10 +304,18 @@ export async function startBiddingPhase(cycleId: string, groupId: string) {
   return { success: true }
 }
 
+
 /**
  * End Bidding Phase and Select Winner
- * FIXED: Sets has_received flag for winner
- * FIXED: Uses actual member count for pot calculation
+ * ✅ FIXED: Auto-selects last eligible member if only 1 remains (final round)
+ * ✅ FIXED: Sets has_received flag for winner
+ * ✅ FIXED: Uses actual member count for pot calculation
+ */
+/**
+ * End Bidding Phase and Select Winner
+ * ✅ FIXED: Auto-selects last eligible member if only 1 remains (final round)
+ * ✅ FIXED: Sets has_received flag for winner CORRECTLY
+ * ✅ FIXED: Uses member.id instead of user_id for updates
  */
 export async function endBiddingPhase(cycleId: string, groupId: string) {
   const supabase = await createClient()
@@ -304,14 +348,138 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
     return { error: 'Only admin or creator can end bidding' }
   }
 
-  // ✅ Get actual member count for pot calculation
+  // Get actual member count for pot calculation
   const { count: memberCount } = await supabase
     .from('rosca_members')
     .select('id', { count: 'exact', head: true })
     .eq('rosca_id', groupId)
 
-  if (group.allocation_method === 'bidding') {
+  // ✅ Check eligible members count (members who haven't received yet)
+  const { data: eligibleMembers } = await supabase
+    .from('rosca_members')
+    .select('id, user_id, slot_number')
+    .eq('rosca_id', groupId)
+    .eq('has_received', false)
 
+  if (!eligibleMembers || eligibleMembers.length === 0) {
+    return { error: 'No eligible members remaining for payout' }
+  }
+
+  // ✅ If only 1 eligible member left, auto-select them (FINAL ROUND)
+// ✅ If only 1 eligible member left, auto-select them (FINAL ROUND)
+if (eligibleMembers.length === 1) {
+  const finalWinner = eligibleMembers[0]
+  const totalAmount = group.contribution_amount * (memberCount || 0)
+
+  console.log('🎯 AUTO-SELECT - Final Winner:', {
+    memberId: finalWinner.id,
+    userId: finalWinner.user_id,
+    slotNumber: finalWinner.slot_number
+  })
+
+  // Update cycle with auto-selected winner
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'payment',
+      bidding_end_date: new Date().toISOString(),
+      winner_id: finalWinner.user_id,
+      winning_bid_amount: totalAmount,
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: `Failed to select final winner: ${updateError.message}` }
+  }
+
+  // ✅ FIXED: Mark winner as having received (using member ID)
+  console.log('🏆 Attempting to mark winner as has_received...')
+  console.log('🏆 Update query: member_id =', finalWinner.id)
+  
+  const { error: memberError, data: updatedMember } = await supabase
+    .from('rosca_members')
+    .update({ has_received: true })
+    .eq('id', finalWinner.id)
+    .select()
+
+  console.log('🏆 Update result:', {
+    error: memberError,
+    updatedMember,
+    rowsAffected: updatedMember?.length || 0
+  })
+
+  if (memberError) {
+    console.error('❌ Error marking winner:', memberError)
+  } else if (!updatedMember || updatedMember.length === 0) {
+    console.error('❌ NO ROWS UPDATED - member ID might be wrong!')
+  } else {
+    console.log('✅ Winner marked successfully:', updatedMember[0])
+  }
+
+  // Auto-verify winner's own payment
+  const { data: winnerPayment } = await supabase
+    .from('cycle_payments')
+    .select('id')
+    .eq('cycle_id', cycleId)
+    .eq('member_id', finalWinner.id)
+    .single()
+
+  if (winnerPayment) {
+    await supabase
+      .from('cycle_payments')
+      .update({
+        has_paid: true,
+        paid_at: new Date().toISOString(),
+        verified_by_receiver: true,
+        receiver_verified_at: new Date().toISOString(),
+      })
+      .eq('id', winnerPayment.id)
+  }
+
+  // Create payment records if they don't exist
+  const { data: existingPayments } = await supabase
+    .from('cycle_payments')
+    .select('id')
+    .eq('cycle_id', cycleId)
+
+  if (!existingPayments || existingPayments.length === 0) {
+    const { data: members } = await supabase
+      .from('rosca_members')
+      .select('id')
+      .eq('rosca_id', groupId)
+
+    if (members && members.length > 0) {
+      await supabase.from('cycle_payments').insert(
+        members.map((member) => ({
+          cycle_id: cycleId,
+          member_id: member.id,
+          has_paid: false,
+          verified_by_receiver: false,
+          verified_by_admin: false,
+        }))
+      )
+    }
+  }
+
+  // Log activity
+  await supabase.from('cycle_activities').insert({
+    cycle_id: cycleId,
+    activity_type: 'winner_declared',
+    user_id: user.id,
+    metadata: {
+      winner_id: finalWinner.user_id,
+      method: 'auto_final_round',
+      amount: totalAmount,
+      note: 'Last eligible member - auto-selected',
+    },
+  })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  return { success: true, autoSelected: true, message: 'Final member auto-selected as winner!' }
+}
+
+  // ✅ NORMAL FLOW: Multiple eligible members remain
+  if (group.allocation_method === 'bidding') {
     // Find lowest bid
     const { data: bids } = await supabase
       .from('cycle_bids')
@@ -341,14 +509,7 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       return { error: 'Failed to end bidding: ' + updateError.message }
     }
 
-    // ✅ FIXED: Mark winner as having received
-    await supabase
-      .from('rosca_members')
-      .update({ has_received: true })
-      .eq('rosca_id', groupId)
-      .eq('user_id', winningBid.user_id)
-
-    // Auto-verify winner's own payment
+    // ✅ FIXED: Get the winner member first, then update using member ID
     const { data: winnerMember } = await supabase
       .from('rosca_members')
       .select('id')
@@ -357,6 +518,17 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       .single()
 
     if (winnerMember) {
+      // ✅ FIXED: Mark winner as having received (using member ID)
+      const { error: memberError } = await supabase
+        .from('rosca_members')
+        .update({ has_received: true })
+        .eq('id', winnerMember.id)  // ✅ Use member.id
+
+      if (memberError) {
+        console.error('Error marking winner:', memberError)
+      }
+
+      // Auto-verify winner's own payment
       await supabase
         .from('cycle_payments')
         .update({
@@ -406,20 +578,7 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
         metadata: { winner_id: winningBid.user_id, amount: winningBid.bid_amount }
       })
   } else {
-    // Random/Banker allocation
-    
-    // Step 1: Get members who haven't received yet
-    const { data: eligibleMembers } = await supabase
-      .from('rosca_members')
-      .select('id, user_id, slot_number')
-      .eq('rosca_id', groupId)
-      .eq('has_received', false)
-
-    if (!eligibleMembers || eligibleMembers.length === 0) {
-      return { error: 'No eligible members remaining for payout' }
-    }
-
-    // Step 2: Select winner based on allocation method
+    // Random/Banker allocation - Select winner based on allocation method
     let selectedWinner
     
     if (group.allocation_method === 'random') {
@@ -434,10 +593,10 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       selectedWinner = eligibleMembers.sort((a, b) => a.slot_number - b.slot_number)[0]
     }
 
-    // ✅ FIXED: Calculate total amount using actual member count
+    // Calculate total amount using actual member count
     const totalAmount = group.contribution_amount * (memberCount || 0)
 
-    // Step 4: Update cycle with winner
+    // Update cycle with winner
     const { error: updateError } = await supabase
       .from('payment_cycles')
       .update({
@@ -452,11 +611,15 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       return { error: 'Failed to start payment phase: ' + updateError.message }
     }
 
-    // ✅ FIXED: Mark winner as having received
-    await supabase
+    // ✅ FIXED: Mark winner as having received (using member ID)
+    const { error: memberError } = await supabase
       .from('rosca_members')
       .update({ has_received: true })
-      .eq('id', selectedWinner.id)
+      .eq('id', selectedWinner.id)  // ✅ Use member.id
+
+    if (memberError) {
+      console.error('Error marking winner:', memberError)
+    }
 
     // Auto-verify winner's own payment
     const { data: winnerPayment } = await supabase
@@ -478,7 +641,7 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
         .eq('id', winnerPayment.id)
     }
 
-    // Step 6: Create payment records if they don't exist
+    // Create payment records if they don't exist
     const { data: existingPayments } = await supabase
       .from('cycle_payments')
       .select('id')
@@ -505,25 +668,25 @@ export async function endBiddingPhase(cycleId: string, groupId: string) {
       }
     }
 
-    // Step 7: Log activity
+    // Log activity
     await supabase
       .from('cycle_activities')
       .insert({
         cycle_id: cycleId,
-        activity_type: 'winner_selected',
+        activity_type: 'winner_declared',
         user_id: user.id,
-        metadata: { 
-          winner_id: selectedWinner.user_id, 
+        metadata: {
+          winner_id: selectedWinner.user_id,
           method: group.allocation_method,
-          amount: totalAmount 
-        }
+          amount: totalAmount,
+        },
       })
   }
 
   revalidatePath(`/dashboard/groups/${groupId}`)
-  
   return { success: true }
 }
+
 
 /**
  * End Payment Collection Phase
@@ -854,7 +1017,6 @@ export async function adminVerifyPayment(
   return { success: true }
 }
 
-
 /**
  * Reset ROSCA - Clear all has_received flags to start fresh
  * Only creator/admin can do this when ALL members have received
@@ -887,7 +1049,7 @@ export async function resetRosca(groupId: string) {
     return { error: 'Only group creator or admin can reset ROSCA' }
   }
 
-  // ✅ Check if there are any active cycles
+  // Check if there are any active cycles
   const { data: activeCycles } = await supabase
     .from('payment_cycles')
     .select('id')
@@ -898,7 +1060,7 @@ export async function resetRosca(groupId: string) {
     return { error: 'Cannot reset while there are active cycles. Complete all cycles first.' }
   }
 
-  // ✅ Verify ALL members have received before allowing reset
+  // Verify ALL members have received before allowing reset
   const { data: members } = await supabase
     .from('rosca_members')
     .select('has_received')
@@ -924,6 +1086,7 @@ export async function resetRosca(groupId: string) {
   
   return { success: true }
 }
+
 
 
 
