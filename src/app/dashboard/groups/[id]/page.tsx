@@ -93,7 +93,8 @@ export default async function GroupPage({
 
   // Get current user's member record
   const currentMember = members?.find(m => m.user_id === user.id)
-  const hasMemberReceived = currentMember?.has_received || false
+const hasMemberReceived = currentMember ? currentMember.has_received : undefined
+
 
 
 // Fetch active cycle

@@ -197,7 +197,7 @@ export default function CycleManager({
               {/* ✅ NEW: Display Payment Details to Other Members */}
               {!isReceiver && isMember && (
 
-                <PaymentDetailsDisplay cycle={cycle} />
+               <PaymentDetailsDisplay cycle={cycle} group={group} />
               )}
 
               {/* ✅ FIXED: Payment Tracker - Only for actual members who are participants */}
@@ -236,8 +236,6 @@ export default function CycleManager({
                     </div>
                   </div>
 
-                  {/* Show payment details to admin */}
-                  <PaymentDetailsDisplay cycle={cycle} />
                   
                   {/* Allow admin to verify payments even if not participating */}
                   {!isOverdue && (
