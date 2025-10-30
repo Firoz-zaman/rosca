@@ -1,0 +1,409 @@
+'use client'
+
+import { useState } from 'react'
+import { saveWinnerPaymentDetails } from '@/app/dashboard/groups/[id]/cycle-actions'
+
+interface WinnerPaymentDetailsFormProps {
+  cycle: any
+  groupId: string
+}
+
+type PaymentMethodType = 'UPI' | 'Bank' | 'Crypto' | 'PayPal' | 'Cash' | 'Other'
+
+export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPaymentDetailsFormProps) {
+  const [methodType, setMethodType] = useState<PaymentMethodType>(
+    cycle.payment_method_type || 'UPI'
+  )
+  const [instructions, setInstructions] = useState(cycle.payment_instructions || '')
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
+
+  // UPI fields
+  const [upiId, setUpiId] = useState(cycle.payment_details?.upi_id || '')
+  const [upiPhone, setUpiPhone] = useState(cycle.payment_details?.phone || '')
+
+  // Bank fields
+  const [accountNumber, setAccountNumber] = useState(cycle.payment_details?.account_number || '')
+  const [ifsc, setIfsc] = useState(cycle.payment_details?.ifsc || '')
+  const [bankName, setBankName] = useState(cycle.payment_details?.bank_name || '')
+  const [accountName, setAccountName] = useState(cycle.payment_details?.account_name || '')
+
+  // Crypto fields
+  const [cryptoCurrency, setCryptoCurrency] = useState(cycle.payment_details?.currency || 'USDT')
+  const [cryptoNetwork, setCryptoNetwork] = useState(cycle.payment_details?.network || 'TRC20')
+  const [cryptoAddress, setCryptoAddress] = useState(cycle.payment_details?.address || '')
+
+  // PayPal fields
+  const [paypalEmail, setPaypalEmail] = useState(cycle.payment_details?.email || '')
+
+  // Cash fields
+  const [cashLocation, setCashLocation] = useState(cycle.payment_details?.location || '')
+  const [cashContact, setCashContact] = useState(cycle.payment_details?.contact || '')
+
+  // Other fields
+  const [otherMethod, setOtherMethod] = useState(cycle.payment_details?.method || '')
+  const [otherDetails, setOtherDetails] = useState(cycle.payment_details?.details || '')
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    setMessage(null)
+
+    let details: Record<string, any> = {}
+
+    // Build details object based on method type
+    switch (methodType) {
+      case 'UPI':
+        details = {
+          upi_id: upiId.trim(),
+          phone: upiPhone.trim(),
+        }
+        break
+      case 'Bank':
+        details = {
+          account_number: accountNumber.trim(),
+          ifsc: ifsc.trim(),
+          bank_name: bankName.trim(),
+          account_name: accountName.trim(),
+        }
+        break
+      case 'Crypto':
+        details = {
+          currency: cryptoCurrency,
+          network: cryptoNetwork,
+          address: cryptoAddress.trim(),
+        }
+        break
+      case 'PayPal':
+        details = {
+          email: paypalEmail.trim(),
+        }
+        break
+      case 'Cash':
+        details = {
+          location: cashLocation.trim(),
+          contact: cashContact.trim(),
+        }
+        break
+      case 'Other':
+        details = {
+          method: otherMethod.trim(),
+          details: otherDetails.trim(),
+        }
+        break
+    }
+
+    const result = await saveWinnerPaymentDetails(cycle.id, groupId, {
+      methodType,
+      details,
+      instructions: instructions.trim(),
+    })
+
+    setLoading(false)
+
+    if (result.error) {
+      setMessage({ type: 'error', text: result.error })
+    } else {
+      setMessage({ type: 'success', text: 'Payment details saved successfully!' })
+    }
+  }
+
+  const renderMethodFields = () => {
+    switch (methodType) {
+      case 'UPI':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                UPI ID <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={upiId}
+                onChange={(e) => setUpiId(e.target.value)}
+                placeholder="yourname@paytm or yourname@oksbi"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Phone Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="tel"
+                value={upiPhone}
+                onChange={(e) => setUpiPhone(e.target.value)}
+                placeholder="9876543210"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+              <p className="text-xs text-gray-500 mt-1">For PhonePe, Google Pay, Paytm, etc.</p>
+            </div>
+          </>
+        )
+
+      case 'Bank':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Account Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={accountNumber}
+                onChange={(e) => setAccountNumber(e.target.value)}
+                placeholder="1234567890"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                IFSC Code / Routing Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={ifsc}
+                onChange={(e) => setIfsc(e.target.value)}
+                placeholder="SBIN0001234"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Bank Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={bankName}
+                onChange={(e) => setBankName(e.target.value)}
+                placeholder="State Bank of India"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Account Holder Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={accountName}
+                onChange={(e) => setAccountName(e.target.value)}
+                placeholder="John Doe"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+          </>
+        )
+
+      case 'Crypto':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Currency <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={cryptoCurrency}
+                onChange={(e) => setCryptoCurrency(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              >
+                <option value="USDT">USDT (Tether)</option>
+                <option value="BTC">Bitcoin (BTC)</option>
+                <option value="ETH">Ethereum (ETH)</option>
+                <option value="USDC">USDC</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Network <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={cryptoNetwork}
+                onChange={(e) => setCryptoNetwork(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              >
+                <option value="TRC20">TRC20 (Tron)</option>
+                <option value="ERC20">ERC20 (Ethereum)</option>
+                <option value="BEP20">BEP20 (BSC)</option>
+                <option value="Bitcoin">Bitcoin Network</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Wallet Address <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={cryptoAddress}
+                onChange={(e) => setCryptoAddress(e.target.value)}
+                placeholder="TXyz123..."
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+              <p className="text-xs text-red-500 mt-1">⚠️ Double-check address - crypto transfers are irreversible!</p>
+            </div>
+          </>
+        )
+
+      case 'PayPal':
+        return (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              PayPal Email <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="email"
+              value={paypalEmail}
+              onChange={(e) => setPaypalEmail(e.target.value)}
+              placeholder="john@example.com"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              required
+            />
+          </div>
+        )
+
+      case 'Cash':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Collection Location <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={cashLocation}
+                onChange={(e) => setCashLocation(e.target.value)}
+                placeholder="Office lobby, Coffee shop, etc."
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Contact Number <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="tel"
+                value={cashContact}
+                onChange={(e) => setCashContact(e.target.value)}
+                placeholder="9876543210"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+          </>
+        )
+
+      case 'Other':
+        return (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Payment Method Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={otherMethod}
+                onChange={(e) => setOtherMethod(e.target.value)}
+                placeholder="Venmo, Zelle, Cash App, etc."
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Payment Details <span className="text-red-500">*</span>
+              </label>
+              <textarea
+                value={otherDetails}
+                onChange={(e) => setOtherDetails(e.target.value)}
+                placeholder="@username, account ID, or other relevant details"
+                rows={3}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                required
+              />
+            </div>
+          </>
+        )
+    }
+  }
+
+  return (
+    <div className="bg-green-50 border-2 border-green-300 rounded-lg p-6">
+      <div className="flex items-center gap-3 mb-4">
+        <span className="text-2xl">🏆</span>
+        <div>
+          <h3 className="text-lg font-bold text-green-900">You're the Winner of Cycle {cycle.cycle_number}!</h3>
+          <p className="text-sm text-green-700">
+            Provide your payment details so members know where to send ₹{cycle.winning_bid_amount?.toLocaleString('en-IN')}
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Payment Method Selector */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Payment Method <span className="text-red-500">*</span>
+          </label>
+          <select
+            value={methodType}
+            onChange={(e) => setMethodType(e.target.value as PaymentMethodType)}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            required
+          >
+            <option value="UPI">UPI (Google Pay, PhonePe, Paytm)</option>
+            <option value="Bank">Bank Transfer</option>
+            <option value="Crypto">Cryptocurrency</option>
+            <option value="PayPal">PayPal</option>
+            <option value="Cash">Cash (In Person)</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+
+        {/* Dynamic Fields Based on Method */}
+        {renderMethodFields()}
+
+        {/* Additional Instructions */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Additional Instructions (Optional)
+          </label>
+          <textarea
+            value={instructions}
+            onChange={(e) => setInstructions(e.target.value)}
+            placeholder='e.g., "Please add ROSCA-Cycle7 in payment remarks"'
+            rows={2}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+          />
+        </div>
+
+        {/* Submit Button */}
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loading ? 'Saving...' : cycle.payment_method_type ? 'Update Payment Details' : 'Save Payment Details'}
+        </button>
+
+        {/* Message */}
+        {message && (
+          <div className={`p-3 rounded-lg text-sm ${
+            message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+          }`}>
+            {message.text}
+          </div>
+        )}
+      </form>
+    </div>
+  )
+}

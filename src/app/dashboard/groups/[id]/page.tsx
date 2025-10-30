@@ -95,15 +95,20 @@ export default async function GroupPage({
   const currentMember = members?.find(m => m.user_id === user.id)
   const hasMemberReceived = currentMember?.has_received || false
 
-  // Fetch active cycle
-  const { data: activeCycle } = await supabase
-    .from('payment_cycles')
-    .select('*')
-    .eq('rosca_id', id)
-    .in('status', ['pending','bidding', 'payment', 'overdue'])
-    .order('cycle_number', { ascending: false })
-    .limit(1)
-    .single()
+
+// Fetch active cycle
+const { data: activeCycle } = await supabase
+  .from('payment_cycles')
+  .select(`
+    *,
+    winner:winner_id(id, email, full_name)
+  `)
+  .eq('rosca_id', id)
+  .in('status', ['pending','bidding', 'payment', 'overdue'])
+  .order('cycle_number', { ascending: false })
+  .limit(1)
+  .single()
+
 
   const isReceiver = activeCycle?.winner_id === user.id
 

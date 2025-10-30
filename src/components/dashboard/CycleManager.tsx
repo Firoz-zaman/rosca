@@ -9,6 +9,8 @@ import AdminOverduePanel from './AdminOverduePanel'
 import StartBiddingButton from './StartBiddingButton'
 import EndBiddingButton from './EndBiddingButton'
 import EndPaymentButton from './EndpaymentButton'
+import WinnerPaymentDetailsForm from './WinnerPaymentDetailsForm'
+import PaymentDetailsDisplay from './PaymentDetailsDisplay'
 
 /**
  * CycleManager - Main container for current cycle
@@ -187,6 +189,16 @@ export default function CycleManager({
           {/* Payment Tab */}
           {activeTab === 'payment' && showPayment && (
             <div className="space-y-4">
+              {/* ✅ NEW: Winner Payment Details Form - Only show to winner */}
+              {isReceiver && (
+                <WinnerPaymentDetailsForm cycle={cycle} groupId={group.id} />
+              )}
+
+              {/* ✅ NEW: Display Payment Details to Other Members */}
+              {!isReceiver && isMember && !(!group.creatorparticipates && isCreator) && (
+                <PaymentDetailsDisplay cycle={cycle} />
+              )}
+
               {/* ✅ FIXED: Payment Tracker - Only for actual members who are participants */}
               {isMember && !(!group.creatorparticipates && isCreator) && (
                 <PaymentTracker
@@ -221,10 +233,15 @@ export default function CycleManager({
                       </p>
                     </div>
                   </div>
+
+                  {/* Show payment details to admin */}
+                  <PaymentDetailsDisplay cycle={cycle} />
                   
                   {/* Allow admin to verify payments even if not participating */}
                   {!isOverdue && (
-                    <VerificationPanel cycle={cycle} groupId={group.id} />
+                    <div className="mt-4">
+                      <VerificationPanel cycle={cycle} groupId={group.id} />
+                    </div>
                   )}
                 </div>
               )}
@@ -235,7 +252,8 @@ export default function CycleManager({
     </div>
   )
 }
-  
+
+
 
 
 

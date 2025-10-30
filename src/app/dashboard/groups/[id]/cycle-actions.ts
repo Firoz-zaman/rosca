@@ -1090,3 +1090,77 @@ export async function resetRosca(groupId: string) {
 
 
 
+/**
+ * Save winner's payment details for current cycle
+ * Only the winner can update their payment details
+ */
+export async function saveWinnerPaymentDetails(
+  cycleId: string,
+  groupId: string,
+  paymentData: {
+    methodType: 'UPI' | 'Bank' | 'Crypto' | 'PayPal' | 'Cash' | 'Other'
+    details: Record<string, any>
+    instructions?: string
+  }
+) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Verify user is the winner of this cycle
+  const { data: cycle } = await supabase
+    .from('payment_cycles')
+    .select('winner_id, status')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycle) {
+    return { error: 'Cycle not found' }
+  }
+
+  if (cycle.winner_id !== user.id) {
+    return { error: 'Only the cycle winner can set payment details' }
+  }
+
+  if (cycle.status !== 'payment' && cycle.status !== 'overdue') {
+    return { error: 'Payment details can only be set during payment phase' }
+  }
+
+  // Update payment details
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      payment_method_type: paymentData.methodType,
+      payment_details: paymentData.details,
+      payment_instructions: paymentData.instructions || null,
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to save payment details: ' + updateError.message }
+  }
+
+  // Log activity
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'payment_details_updated',
+      user_id: user.id,
+      metadata: {
+        method_type: paymentData.methodType,
+      }
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+
+
+
+
