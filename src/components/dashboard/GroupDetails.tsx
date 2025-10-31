@@ -77,7 +77,7 @@ export default function GroupDetails({
 
         {/* Allocation Method */}
         <div>
-          <p className="text-sm text-gray-500 mb-1">Price</p>
+          <p className="text-sm text-gray-500 mb-1">ROSCA Prize</p>
           <p className="text-lg font-semibold text-gray-900 capitalize">
             {formatCurrency(group.contribution_amount * group.total_slots)}
           </p>
