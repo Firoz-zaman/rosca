@@ -57,7 +57,10 @@ export default function PaymentDetailsDisplay({ cycle, group }: PaymentDetailsDi
         {/* UK Bank Transfer Details Only */}
         <div className="bg-white rounded-lg p-4 border border-blue-200">
           <p className="text-sm font-medium text-gray-600 mb-2">Account Holder Name</p>
-          <p className="text-lg text-blue-900">{details.account_name}</p>
+          <div className="flex items-center justify-between">
+            <p className="text-lg text-blue-900">{details.account_name}</p>
+            {renderCopyButton(details.account_name, 'accountname')}
+          </div>
         </div>
 
         <div className="bg-white rounded-lg p-4 border border-blue-200">
