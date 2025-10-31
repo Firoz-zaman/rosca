@@ -465,7 +465,7 @@ if (eligibleMembers.length === 1) {
   await supabase.from('cycle_activities').insert({
     cycle_id: cycleId,
     activity_type: 'winner_declared',
-    user_id: user.id,
+    user_id: finalWinner.user_id,
     metadata: {
       winner_id: finalWinner.user_id,
       method: 'auto_final_round',
@@ -568,13 +568,20 @@ if (eligibleMembers.length === 1) {
       }
     }
 
+          // Log bidding closed
+          await supabase.from('cycle_activities').insert({
+            cycle_id: cycleId,
+            activity_type: 'bidding_closed',
+            user_id: user.id
+          })
+
     // Log activity
     await supabase
       .from('cycle_activities')
       .insert({
         cycle_id: cycleId,
-        activity_type: 'bidding_closed',
-        user_id: user.id,
+        activity_type: 'winner_declared',
+        user_id: winningBid.user_id,
         metadata: { winner_id: winningBid.user_id, amount: winningBid.bid_amount }
       })
   } else {
@@ -674,7 +681,7 @@ if (eligibleMembers.length === 1) {
       .insert({
         cycle_id: cycleId,
         activity_type: 'winner_declared',
-        user_id: user.id,
+        user_id: selectedWinner.user_id,
         metadata: {
           winner_id: selectedWinner.user_id,
           method: group.allocation_method,
@@ -952,18 +959,35 @@ export async function verifyPayment(
     return { error: 'Failed to verify payment' }
   }
 
+  // ✅ NEW: Fetch member's name before logging activity
+  const { data: memberData } = await supabase
+    .from('rosca_members')
+    .select('user_id')
+    .eq('id', memberIdToVerify)
+    .single()
+
+  const { data: profileData } = await supabase
+    .from('profiles')
+    .select('full_name')
+    .eq('id', memberData?.user_id)
+    .single()
+
   await supabase
     .from('cycle_activities')
     .insert({
       cycle_id: cycleId,
       activity_type: 'payment_verified',
       user_id: user.id,
-      metadata: { verified_member_id: memberIdToVerify }
+      metadata: { 
+        verified_member_id: memberIdToVerify, 
+        verified_member_name: profileData?.full_name || 'a member'  // ✅ Now defined
+      }
     })
 
   revalidatePath(`/dashboard/groups/${roscaId}`)
   return { success: true }
 }
+
 
 /**
  * Admin verification for overdue payments
@@ -1143,17 +1167,22 @@ export async function saveWinnerPaymentDetails(
     return { error: 'Failed to save payment details: ' + updateError.message }
   }
 
-  // Log activity
-  await supabase
-    .from('cycle_activities')
-    .insert({
-      cycle_id: cycleId,
-      activity_type: 'payment_details_updated',
-      user_id: user.id,
-      metadata: {
-        method_type: paymentData.methodType,
-      }
-    })
+// Log activity
+const { error: activityError } = await supabase
+  .from('cycle_activities')
+  .insert({
+    cycle_id: cycleId,
+    activity_type: 'payment_details_published',
+    user_id: user.id,
+    metadata: {
+      method_type: paymentData.methodType,
+    }
+  })
+
+if (activityError) {
+  console.error('Failed to log payment_details_published activity:', activityError)
+}
+
 
   revalidatePath(`/dashboard/groups/${groupId}`)
   

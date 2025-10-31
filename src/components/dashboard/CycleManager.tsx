@@ -57,7 +57,7 @@ export default function CycleManager({
       <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-lg p-6 text-white">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-2xl font-bold">Cycle {cycle.cycle_number}</h2>
+            <h2 className="text-2xl font-bold">Cycle {cycle.cycle_number}/{group.total_slots}</h2>
             <p className="text-blue-100 mt-1">
               {isPending && 'Waiting to start bidding phase'}
               {isBidding && 'Bidding Phase Active'}

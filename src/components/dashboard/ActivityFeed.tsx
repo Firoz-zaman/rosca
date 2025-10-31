@@ -58,38 +58,61 @@ export default function ActivityFeed({ cycleId }: { cycleId: string }) {
     })
   }
 
-  const getActivityMessage = (activity: any) => {
-    const userName = activity.user?.full_name || 'Someone'
+const getActivityMessage = (activity: any) => {
+  const userName = activity.user?.full_name || 'Someone'
+  
+  switch (activity.activity_type) {
+    case 'cycle_started':
+      return { icon: '🎬', text: 'Cycle started', color: 'bg-blue-100 text-blue-800' }
     
-    switch (activity.activity_type) {
-      case 'cycle_started':
-        return { icon: '🎬', text: 'Cycle started', color: 'bg-blue-100 text-blue-800' }
-      case 'bidding_opened':
-        return { icon: '🎯', text: 'Bidding is now open', color: 'bg-yellow-100 text-yellow-800' }
-      case 'bid_placed':
-        return { 
-          icon: '⬇️', 
-          text: `${userName} bid ₹${activity.metadata?.bid_amount?.toLocaleString('en-IN')}`,
-          color: 'bg-purple-100 text-purple-800' 
-        }
-      case 'bidding_closed':
-        return { icon: '🔒', text: 'Bidding closed', color: 'bg-gray-100 text-gray-800' }
-      case 'winner_declared':
-        return { icon: '👑', text: `${userName} won the bid!`, color: 'bg-green-100 text-green-800' }
-      case 'payment_phase_started':
-        return { icon: '💰', text: 'Payment phase started', color: 'bg-blue-100 text-blue-800' }
-      case 'payment_made':
-        return { icon: '✓', text: `${userName} marked payment`, color: 'bg-green-100 text-green-800' }
-      case 'payment_verified':
-        return { icon: '🎉', text: `${userName}'s payment verified`, color: 'bg-teal-100 text-teal-800' }
-      case 'admin_verified_payment':
-        return { icon: '⭐', text: `Admin verified ${userName}'s payment`, color: 'bg-purple-100 text-purple-800' }
-      case 'cycle_completed':
-        return { icon: '🏁', text: 'Cycle completed', color: 'bg-gray-100 text-gray-800' }
-      default:
-        return { icon: '📌', text: activity.activity_type, color: 'bg-gray-100 text-gray-800' }
-    }
+    case 'bidding_opened':
+      return { icon: '🎯', text: 'Bidding is now open', color: 'bg-yellow-100 text-yellow-800' }
+    
+    case 'bid_placed':
+      return { 
+        icon: '⬇️', 
+        text: `${userName} bid ₹${activity.metadata?.bid_amount?.toLocaleString('en-IN')}`,
+        color: 'bg-purple-100 text-purple-800' 
+      }
+    
+    case 'bidding_closed':
+      return { icon: '🔒', text: 'Bidding closed', color: 'bg-gray-100 text-gray-800' }
+    
+    // ✅ CHANGED: "won the bid!" → "won this round!"
+    case 'winner_declared':
+      return { icon: '👑', text: `${userName} won this round!`, color: 'bg-green-100 text-green-800' }
+    
+    // ✅ NEW: Payment details published event
+    case 'payment_details_published':
+      return { icon: '📝', text: 'Payment details published', color: 'bg-blue-100 text-blue-800' }
+    
+    case 'payment_phase_started':
+      return { icon: '💰', text: 'Payment phase started', color: 'bg-blue-100 text-blue-800' }
+    
+    case 'payment_made':
+      return { icon: '✓', text: `${userName} marked payment`, color: 'bg-green-100 text-green-800' }
+    
+    // ✅ CHANGED: "userName's payment verified" → "Winner verified [member]'s payment"
+    case 'payment_verified':
+      const verifiedMemberName = activity.metadata?.verified_member_name || 'a member'
+      const winnerName = activity.user?.full_name || 'Winner'  // ✅ ADD THIS LINE
+      return { 
+        icon: '🎉', 
+        text: `${winnerName} verified ${verifiedMemberName}'s payment`,
+        color: 'bg-teal-100 text-teal-800' 
+      }
+    
+    case 'admin_verified_payment':
+      return { icon: '⭐', text: `Admin verified ${userName}'s payment`, color: 'bg-purple-100 text-purple-800' }
+    
+    case 'cycle_completed':
+      return { icon: '🏁', text: 'Cycle completed', color: 'bg-gray-100 text-gray-800' }
+    
+    default:
+      return { icon: '📌', text: activity.activity_type, color: 'bg-gray-100 text-gray-800' }
   }
+}
+
 
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200">

@@ -79,10 +79,23 @@ const fetchPaymentStatus = async () => {
 const handleMarkPaid = async () => {
   console.log('🔘 Button clicked! Cycle:', cycle.id, 'Rosca:', cycle.rosca_id)
   setLoading(true)
+  
+  // ✅ Optimistic UI update - immediately mark as paid
+  const previousPayment = payment
+  setPayment({ ...payment, has_paid: true })
+  
   const result = await markPaymentMade(cycle.id, cycle.rosca_id)
   console.log('📥 Result from markPaymentMade:', result)
+  
+  // ✅ If error, revert the optimistic update
+  if (result?.error) {
+    console.error('❌ Failed to mark payment:', result.error)
+    setPayment(previousPayment)
+  }
+  
   setLoading(false)
 }
+
 
 
   if (isReceiver) {
@@ -116,14 +129,14 @@ const handleMarkPaid = async () => {
               💰 Please send ₹{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-IN')} to the receiver
             </p>
 
-            <button
-              onClick={handleMarkPaid}
-              disabled={loading || payment?.has_paid}
+          <button
+            onClick={handleMarkPaid}
+            disabled={loading || payment?.has_paid}
+            className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? 'Marking...' : '✓ I Paid'}
+          </button>
 
-              className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors disabled:opacity-50"
-            >
-              {loading ? 'Marking...' : '✓ I Paid'}
-            </button>
           </div>
         </div>
       ) : (
