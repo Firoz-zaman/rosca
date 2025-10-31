@@ -52,7 +52,7 @@ export default function GroupDetails({
             )}
           </div>
           <span className={`px-3 py-1 rounded-full text-sm font-medium ${statusColors[group.status as keyof typeof statusColors]}`}>
-            {group.status.charAt(0).toUpperCase() + group.status.slice(1)}
+            {group.status === 'pending' ? 'In Progress' : group.status.charAt(0).toUpperCase() + group.status.slice(1)}
           </span>
         </div>
       </div>

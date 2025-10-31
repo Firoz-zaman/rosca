@@ -287,7 +287,7 @@ export default async function DashboardPage() {
                             ? 'bg-yellow-100 text-yellow-700'
                             : 'bg-gray-100 text-gray-700'
                         }`}>
-                          {group.status}
+                          {group.status === 'pending' ? 'In Progress' : group.status}
                         </span>
                         {/* ✅ NEW: Show banker badge for non-participating creators */}
                         {!group.is_member && group.created_by === user.id && (
