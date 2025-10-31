@@ -174,7 +174,7 @@ export default function SignInPage() {
               </div>
             </div>
 
-            <button
+            {/* <button
               onClick={handleGoogleSignIn}
               disabled={loading}
               className="mt-4 w-full bg-white border-2 border-slate-300 text-slate-700 py-3 px-6 rounded-lg font-semibold hover:bg-slate-50 focus:ring-4 focus:ring-slate-200 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -192,7 +192,7 @@ export default function SignInPage() {
                 <span className="flex items-center justify-center gap-2">
                   🍎 Sign `in with Apple
                 </span>
-              </button>
+              </button> */}
 
 
           </div>
