@@ -27,6 +27,10 @@ export default function VerificationPanel({
     }
   }, [isOpen])
 
+  useEffect(() => {
+  fetchPayments()
+}, [cycle.id])
+
   const fetchPayments = async () => {
     // Fetch payments with basic member info
     const { data: paymentsData } = await supabase

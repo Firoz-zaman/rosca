@@ -782,6 +782,25 @@ export async function endPaymentPhase(cycleId: string, groupId: string) {
       user_id: user.id
     })
 
+
+    // ✅ NEW: Check if ALL members have received - if yes, mark ROSCA as completed
+  const { data: allMembers } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+
+  const allHaveReceived = allMembers?.every(m => m.has_received === true)
+
+  if (allHaveReceived) {
+  // Mark ROSCA as completed
+    await supabase
+      .from('roscas')
+      .update({ status: 'completed' })
+      .eq('id', groupId)
+  
+    console.log('🎉 ROSCA completed! All members have received their payout.')
+  }
+
   revalidatePath(`/dashboard/groups/${groupId}`)
   
   return { success: true }
