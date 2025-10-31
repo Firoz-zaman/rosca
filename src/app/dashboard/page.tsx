@@ -328,7 +328,7 @@ export default async function DashboardPage() {
                     <div>
                       <p className="text-xs text-slate-500 mb-1">Contribution</p>
                       <p className="text-lg font-bold text-slate-900">
-                        ₹{Number(group.contribution_amount).toLocaleString('en-IN')}
+                        £{Number(group.contribution_amount).toLocaleString('en-GB')}
                       </p>
                     </div>
                     <div className="text-right">

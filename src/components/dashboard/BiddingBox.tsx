@@ -124,7 +124,7 @@ export default function BiddingBox({
     }
 
     if (amount >= lowestBid) {
-      setError(`Bid must be lower than ₹${lowestBid.toLocaleString('en-IN')}`)
+      setError(`Bid must be lower than £${lowestBid.toLocaleString('en-GB')}`)
       return
     }
 
@@ -151,7 +151,7 @@ export default function BiddingBox({
       <div className="bg-gradient-to-r from-yellow-50 to-orange-50 border-2 border-yellow-300 rounded-lg p-6 mb-6">
         <p className="text-sm text-yellow-800 mb-2">Current Lowest Bid</p>
         <p className="text-4xl font-bold text-yellow-900">
-          ₹{lowestBid.toLocaleString('en-IN')}
+          £{lowestBid.toLocaleString('en-GB')}
         </p>
         <p className="text-xs text-yellow-700 mt-2">
           {recentBids.length > 0 ? `${recentBids.length} bid(s) placed` : 'No bids yet - be the first!'}
@@ -191,7 +191,7 @@ export default function BiddingBox({
               Your Bid Amount
             </label>
             <div className="relative">
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">£</span>
               <input
                 type="number"
                 value={bidAmount}
@@ -239,7 +239,7 @@ export default function BiddingBox({
                       {bid.profile?.full_name || 'Unknown'}
                     </p>
                     <p className="text-xs text-gray-500">
-                      {new Date(bid.created_at).toLocaleString('en-IN', {
+                      {new Date(bid.created_at).toLocaleString('en-GB', {
                         month: 'short',
                         day: 'numeric',
                         hour: '2-digit',
@@ -249,7 +249,7 @@ export default function BiddingBox({
                   </div>
                 </div>
                 <p className={`font-bold ${index === 0 ? 'text-yellow-900' : 'text-gray-700'}`}>
-                  ₹{bid.bid_amount.toLocaleString('en-IN')}
+                  £{bid.bid_amount.toLocaleString('en-GB')}
                 </p>
               </div>
             ))}

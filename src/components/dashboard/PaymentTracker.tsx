@@ -126,7 +126,7 @@ const handleMarkPaid = async () => {
         <div className="space-y-4">
           <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
             <p className="text-sm text-yellow-800 mb-3">
-              💰 Please send ₹{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-IN')} to the receiver
+              💰 Please send £{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-GB')} to the receiver
             </p>
 
           <button

@@ -853,7 +853,7 @@ export async function placeBid(cycleId: string, bidAmount: number, roscaId: stri
   const currentLowest = lowestBid?.bid_amount || cycle.winning_bid_amount
 
   if (bidAmount >= currentLowest) {
-    return { error: `Bid must be lower than current lowest (₹${currentLowest})` }
+    return { error: `Bid must be lower than current lowest (£${currentLowest})` }
   }
 
   const { error: bidError } = await supabase

@@ -52,7 +52,7 @@ export default function ActivityFeed({ cycleId }: { cycleId: string }) {
 
   const formatTime = (timestamp: string) => {
     const date = new Date(timestamp)
-    return date.toLocaleTimeString('en-IN', { 
+    return date.toLocaleTimeString('en-GB', { 
       hour: '2-digit', 
       minute: '2-digit' 
     })
@@ -71,7 +71,7 @@ const getActivityMessage = (activity: any) => {
     case 'bid_placed':
       return { 
         icon: '⬇️', 
-        text: `${userName} bid ₹${activity.metadata?.bid_amount?.toLocaleString('en-IN')}`,
+        text: `${userName} bid £${activity.metadata?.bid_amount?.toLocaleString('en-GB')}`,
         color: 'bg-purple-100 text-purple-800' 
       }
     

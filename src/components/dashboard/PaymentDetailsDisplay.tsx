@@ -184,10 +184,10 @@ export default function PaymentDetailsDisplay({ cycle, group }: PaymentDetailsDi
 
             <div className="bg-blue-100 rounded-lg p-3 mt-4">
                 <p className="text-sm text-blue-800">
-                 <strong>Your Share:</strong> ₹{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                 <strong>Your Share:</strong> £{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </p>
                 <p className="text-xs text-blue-600 mt-1">
-                        (Total pot: ₹{cycle.winning_bid_amount?.toLocaleString('en-IN')} ÷ {group.total_slots} members)
+                        (Total pot: £{cycle.winning_bid_amount?.toLocaleString('en-GB')} ÷ {group.total_slots} members)
                 </p>
             </div>
 

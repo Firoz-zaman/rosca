@@ -343,7 +343,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
         <div>
           <h3 className="text-lg font-bold text-green-900">You're the Winner of Cycle {cycle.cycle_number}!</h3>
           <p className="text-sm text-green-700">
-            Provide your payment details so members know where to send ₹{cycle.winning_bid_amount?.toLocaleString('en-IN')}
+            Provide your payment details so members know where to send £{cycle.winning_bid_amount?.toLocaleString('en-GB')}
           </p>
         </div>
       </div>

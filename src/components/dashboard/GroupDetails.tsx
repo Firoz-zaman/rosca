@@ -13,16 +13,16 @@ export default function GroupDetails({
 }) {
   // Format currency for Indian context
   const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-IN', {
+    return new Intl.NumberFormat('en-GB', {
       style: 'currency',
-      currency: 'INR',
+      currency: 'GBP',
       maximumFractionDigits: 0
     }).format(amount)
   }
 
   // Format date
   const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-IN', {
+    return new Date(dateString).toLocaleDateString('en-GB', {
       day: 'numeric',
       month: 'short',
       year: 'numeric'
