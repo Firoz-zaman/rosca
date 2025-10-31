@@ -77,19 +77,23 @@ export default function GroupDetails({
 
         {/* Allocation Method */}
         <div>
-          <p className="text-sm text-gray-500 mb-1">Allocation Method</p>
+          <p className="text-sm text-gray-500 mb-1">Price</p>
           <p className="text-lg font-semibold text-gray-900 capitalize">
-            {group.allocation_method}
+            {formatCurrency(group.contribution_amount * group.total_slots)}
           </p>
         </div>
 
-        {/* Available Slots */}
+        {/* Fees */}
         <div>
-          <p className="text-sm text-gray-500 mb-1">Available Slots</p>
+          <p className="text-sm text-gray-500 mb-1">Fees</p>
           <p className="text-lg font-semibold text-gray-900">
-            {availableSlots} remaining
+            <span className="line-through text-gray-400 mr-2">1%</span>
+            <span className="text-gray-400">→</span>
+            <span className="text-green-600">0%</span>
           </p>
+          {/*<p className="text-xs text-green-600 mt-1">🎉 Launch Offer!</p>*/}
         </div>
+
 
         {/* Start Date */}
         {group.start_date && (
