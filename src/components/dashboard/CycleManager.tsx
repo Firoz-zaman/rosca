@@ -1,5 +1,6 @@
 'use client'
 
+
 import { useState } from 'react'
 import BiddingBox from './BiddingBox'
 import PaymentTracker from './PaymentTracker'
@@ -11,6 +12,7 @@ import EndBiddingButton from './EndBiddingButton'
 import EndPaymentButton from './EndpaymentButton'
 import WinnerPaymentDetailsForm from './WinnerPaymentDetailsForm'
 import PaymentDetailsDisplay from './PaymentDetailsDisplay'
+
 
 /**
  * CycleManager - Main container for current cycle
@@ -36,6 +38,7 @@ export default function CycleManager({
 }) {
   const [activeTab, setActiveTab] = useState('activity') // 'payment' | 'activity'
 
+
   // Status checks
   const isPending = cycle.status === 'pending'
   const isBidding = cycle.status === 'bidding'
@@ -43,13 +46,16 @@ export default function CycleManager({
   const isOverdue = cycle.status === 'overdue'
   const isCompleted = cycle.status === 'completed'
 
+
   // ✅ Check if user is actually a member (not just creator)
   const isMember = hasMemberReceived !== undefined // If has_received exists, they're a member
   const isCreator = group.created_by === currentUser.id
 
+
   // UI visibility
   const showBidding = group.allocation_method === 'bidding' && isBidding
   const showPayment = isPayment || isOverdue
+
 
   return (
     <div className="space-y-4">
@@ -67,6 +73,7 @@ export default function CycleManager({
             </p>
           </div>
 
+
           <div className="text-right">
             <span className={`px-4 py-2 rounded-full text-sm font-semibold ${
               isPending ? 'bg-gray-400 text-gray-900' :
@@ -81,10 +88,49 @@ export default function CycleManager({
         </div>
       </div>
 
+
+      {/* 🔥 DEADLINE BOX - Shows based on cycle phase 🔥 */}
+      {isBidding && (
+        <div className="bg-yellow-50 border-2 border-yellow-400 rounded-lg p-5 shadow-lg">
+          <div className="flex items-center gap-3">
+            <span className="text-4xl">⏰</span>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-yellow-700 uppercase tracking-wide">
+                Bidding Deadline
+              </p>
+              <p className="text-2xl font-bold text-yellow-900 mt-1">
+                11/03/2025 Monday, 5:00 PM local time
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(isPayment || isOverdue) && (
+        <div className="bg-red-50 border-2 border-red-400 rounded-lg p-5 shadow-lg">
+          <div className="flex items-center gap-3">
+            <span className="text-4xl">⚠️</span>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-red-700 uppercase tracking-wide">
+                Payment Deadline
+              </p>
+              <p className="text-2xl font-bold text-red-900 mt-1">
+                11/05/2025 (Tuesday) 11:59 PM local time
+              </p>
+              <p className="text-xs text-red-700 mt-2">
+                All payments must be verified before this date
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+
       {/* Admin Control Panel - Shows different button based on status */}
       {(isAdmin || group.created_by === currentUser.id) && (
         <div className="bg-white rounded-lg border-2 border-blue-200 p-6">
           <h3 className="text-lg font-bold text-gray-900 mb-4">📊 Admin Controls</h3>
+
 
           {/* Status: PENDING - Show Start Bidding Button */}
           {isPending && (
@@ -96,6 +142,7 @@ export default function CycleManager({
             </div>
           )}
 
+
           {/* Status: BIDDING - Show End Bidding Button */}
           {isBidding && (
             <div className="space-y-3">
@@ -106,6 +153,7 @@ export default function CycleManager({
             </div>
           )}
 
+
           {/* Status: PAYMENT - Show Complete Cycle Button */}
           {(isPayment || isOverdue) && (
             <div className="space-y-3">
@@ -115,6 +163,7 @@ export default function CycleManager({
               <EndPaymentButton cycleId={cycle.id} groupId={group.id} />
             </div>
           )}
+
 
           {/* Status: COMPLETED */}
           {isCompleted && (
@@ -130,6 +179,7 @@ export default function CycleManager({
         </div>
       )}
 
+
       {/* Pending State - Info for regular members (non-admins, non-creators) */}
       {isPending && !isAdmin && group.created_by !== currentUser.id && (
         <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6 text-center">
@@ -142,6 +192,7 @@ export default function CycleManager({
         </div>
       )}
 
+
       {/* ✅ FIXED: Bidding Box - Show to members OR admins (even non-participating) */}
       {showBidding && (isMember ? !hasMemberReceived : isCreator || isAdmin) && (
         <BiddingBox 
@@ -150,6 +201,7 @@ export default function CycleManager({
           currentUser={currentUser} 
         />
       )}
+
 
       {/* Tab Navigation */}
       {!isPending && (
@@ -164,6 +216,7 @@ export default function CycleManager({
           >
             📋 Activity Feed
           </button>
+
 
           {showPayment && (
             <button
@@ -180,11 +233,13 @@ export default function CycleManager({
         </div>
       )}
 
+
       {/* Content */}
       {!isPending && (
         <>
           {/* ✅ FIXED: Activity Feed - Always show (no member check) */}
           {activeTab === 'activity' && <ActivityFeed cycleId={cycle.id} />}
+
 
           {/* Payment Tab */}
           {activeTab === 'payment' && showPayment && (
@@ -194,14 +249,18 @@ export default function CycleManager({
                 <WinnerPaymentDetailsForm cycle={cycle} groupId={group.id} />
               )}
 
+
               {/* ✅ NEW: Display Payment Details to Other Members */}
               {!isReceiver && isMember && (
+
 
                <PaymentDetailsDisplay cycle={cycle} group={group} />
               )}
 
+
               {/* ✅ FIXED: Payment Tracker - Only for actual members who are participants */}
               {isMember && (
+
 
                 <PaymentTracker
                   cycle={cycle}
@@ -211,15 +270,18 @@ export default function CycleManager({
                 />
               )}
 
+
               {/* Verification Panel for receiver */}
               {isReceiver && !isOverdue && (
                 <VerificationPanel cycle={cycle} groupId={group.id} />
               )}
 
+
               {/* Admin Panel for overdue payments */}
               {isAdmin && isOverdue && (
                 <AdminOverduePanel cycle={cycle} groupId={group.id} />
               )}
+
 
               {/* ✅ FIXED: Non-participating admin view - with verification panel */}
               {!isMember && (isCreator || isAdmin) && (
@@ -235,6 +297,7 @@ export default function CycleManager({
                       </p>
                     </div>
                   </div>
+
 
                   
                   {/* Allow admin to verify payments even if not participating */}

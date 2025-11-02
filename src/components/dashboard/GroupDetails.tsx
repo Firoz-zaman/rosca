@@ -89,7 +89,7 @@ export default function GroupDetails({
           <p className="text-lg font-semibold text-gray-900">
             <span className="line-through text-gray-400 mr-2">1%</span>
             <span className="text-gray-400">→</span>
-            <span className="text-green-600">0%</span>
+            <span className="text-green-600">  0%</span>
           </p>
           {/*<p className="text-xs text-green-600 mt-1">🎉 Launch Offer!</p>*/}
         </div>

@@ -192,14 +192,17 @@ export default function BiddingBox({
             </label>
             <div className="relative">
               <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">£</span>
-              <input
-                type="number"
+            <input
+               type="number"
+                step="1"
+                min="0"
                 value={bidAmount}
                 onChange={(e) => setBidAmount(e.target.value)}
                 placeholder={`Less than ${lowestBid}`}
                 className="w-full pl-8 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 required
               />
+
             </div>
             {error && (
               <p className="text-sm text-red-600 mt-2">{error}</p>

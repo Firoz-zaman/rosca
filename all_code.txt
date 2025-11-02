@@ -93,11 +93,13 @@ Header.tsx
 MembersList.tsx
 MobileMenu.tsx
 PaymentDetailsDisplay.tsx
+PaymentDetailsDisplay.txt
 PaymentTracker.tsx
 ResetRoscaButton.tsx
 StartBiddingButton.tsx
 StartCycleButton.tsx
 VerificationPanel.tsx
+WinnerPaymentDetailsForm1.txt
 WinnerPaymentDetailsForm.tsx
 
 src/components/ui:
@@ -548,7 +550,7 @@ export default async function DashboardPage() {
                             ? 'bg-yellow-100 text-yellow-700'
                             : 'bg-gray-100 text-gray-700'
                         }`}>
-                          {group.status}
+                          {group.status === 'pending' ? 'In Progress' : group.status}
                         </span>
                         {/* ✅ NEW: Show banker badge for non-participating creators */}
                         {!group.is_member && group.created_by === user.id && (
@@ -589,7 +591,7 @@ export default async function DashboardPage() {
                     <div>
                       <p className="text-xs text-slate-500 mb-1">Contribution</p>
                       <p className="text-lg font-bold text-slate-900">
-                        ₹{Number(group.contribution_amount).toLocaleString('en-IN')}
+                        £{Number(group.contribution_amount).toLocaleString('en-GB')}
                       </p>
                     </div>
                     <div className="text-right">
@@ -1012,7 +1014,8 @@ export default async function GroupPage({
 
   // Get current user's member record
   const currentMember = members?.find(m => m.user_id === user.id)
-  const hasMemberReceived = currentMember?.has_received || false
+const hasMemberReceived = currentMember ? currentMember.has_received : undefined
+
 
 
 // Fetch active cycle
@@ -1634,7 +1637,7 @@ if (eligibleMembers.length === 1) {
   await supabase.from('cycle_activities').insert({
     cycle_id: cycleId,
     activity_type: 'winner_declared',
-    user_id: user.id,
+    user_id: finalWinner.user_id,
     metadata: {
       winner_id: finalWinner.user_id,
       method: 'auto_final_round',
@@ -1737,13 +1740,20 @@ if (eligibleMembers.length === 1) {
       }
     }
 
+          // Log bidding closed
+          await supabase.from('cycle_activities').insert({
+            cycle_id: cycleId,
+            activity_type: 'bidding_closed',
+            user_id: user.id
+          })
+
     // Log activity
     await supabase
       .from('cycle_activities')
       .insert({
         cycle_id: cycleId,
-        activity_type: 'bidding_closed',
-        user_id: user.id,
+        activity_type: 'winner_declared',
+        user_id: winningBid.user_id,
         metadata: { winner_id: winningBid.user_id, amount: winningBid.bid_amount }
       })
   } else {
@@ -1843,7 +1853,7 @@ if (eligibleMembers.length === 1) {
       .insert({
         cycle_id: cycleId,
         activity_type: 'winner_declared',
-        user_id: user.id,
+        user_id: selectedWinner.user_id,
         metadata: {
           winner_id: selectedWinner.user_id,
           method: group.allocation_method,
@@ -1944,6 +1954,25 @@ export async function endPaymentPhase(cycleId: string, groupId: string) {
       user_id: user.id
     })
 
+
+    // ✅ NEW: Check if ALL members have received - if yes, mark ROSCA as completed
+  const { data: allMembers } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+
+  const allHaveReceived = allMembers?.every(m => m.has_received === true)
+
+  if (allHaveReceived) {
+  // Mark ROSCA as completed
+    await supabase
+      .from('roscas')
+      .update({ status: 'completed' })
+      .eq('id', groupId)
+  
+    console.log('🎉 ROSCA completed! All members have received their payout.')
+  }
+
   revalidatePath(`/dashboard/groups/${groupId}`)
   
   return { success: true }
@@ -1996,7 +2025,7 @@ export async function placeBid(cycleId: string, bidAmount: number, roscaId: stri
   const currentLowest = lowestBid?.bid_amount || cycle.winning_bid_amount
 
   if (bidAmount >= currentLowest) {
-    return { error: `Bid must be lower than current lowest (₹${currentLowest})` }
+    return { error: `Bid must be lower than current lowest (£${currentLowest})` }
   }
 
   const { error: bidError } = await supabase
@@ -2121,18 +2150,35 @@ export async function verifyPayment(
     return { error: 'Failed to verify payment' }
   }
 
+  // ✅ NEW: Fetch member's name before logging activity
+  const { data: memberData } = await supabase
+    .from('rosca_members')
+    .select('user_id')
+    .eq('id', memberIdToVerify)
+    .single()
+
+  const { data: profileData } = await supabase
+    .from('profiles')
+    .select('full_name')
+    .eq('id', memberData?.user_id)
+    .single()
+
   await supabase
     .from('cycle_activities')
     .insert({
       cycle_id: cycleId,
       activity_type: 'payment_verified',
       user_id: user.id,
-      metadata: { verified_member_id: memberIdToVerify }
+      metadata: { 
+        verified_member_id: memberIdToVerify, 
+        verified_member_name: profileData?.full_name || 'a member'  // ✅ Now defined
+      }
     })
 
   revalidatePath(`/dashboard/groups/${roscaId}`)
   return { success: true }
 }
+
 
 /**
  * Admin verification for overdue payments
@@ -2312,17 +2358,22 @@ export async function saveWinnerPaymentDetails(
     return { error: 'Failed to save payment details: ' + updateError.message }
   }
 
-  // Log activity
-  await supabase
-    .from('cycle_activities')
-    .insert({
-      cycle_id: cycleId,
-      activity_type: 'payment_details_updated',
-      user_id: user.id,
-      metadata: {
-        method_type: paymentData.methodType,
-      }
-    })
+// Log activity
+const { error: activityError } = await supabase
+  .from('cycle_activities')
+  .insert({
+    cycle_id: cycleId,
+    activity_type: 'payment_details_published',
+    user_id: user.id,
+    metadata: {
+      method_type: paymentData.methodType,
+    }
+  })
+
+if (activityError) {
+  console.error('Failed to log payment_details_published activity:', activityError)
+}
+
 
   revalidatePath(`/dashboard/groups/${groupId}`)
   
@@ -3204,7 +3255,7 @@ export default function SignInPage() {
               </div>
             </div>
 
-            <button
+            {/* <button
               onClick={handleGoogleSignIn}
               disabled={loading}
               className="mt-4 w-full bg-white border-2 border-slate-300 text-slate-700 py-3 px-6 rounded-lg font-semibold hover:bg-slate-50 focus:ring-4 focus:ring-slate-200 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3222,7 +3273,7 @@ export default function SignInPage() {
                 <span className="flex items-center justify-center gap-2">
                   🍎 Sign `in with Apple
                 </span>
-              </button>
+              </button> */}
 
 
           </div>
@@ -3702,7 +3753,7 @@ export default function SignUpPage() {
               </div>
             </div>
 
-            <button
+            {/* <button
               onClick={handleGoogleSignIn}
               disabled={loading}
               className="mt-4 w-full bg-white border-2 border-slate-300 text-slate-700 py-3 px-6 rounded-lg font-semibold hover:bg-slate-50 focus:ring-4 focus:ring-slate-200 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3722,7 +3773,7 @@ export default function SignUpPage() {
                 <span className="flex items-center justify-center gap-2">
                   🍎 Sign up with Apple
                 </span>
-            </button>
+            </button> */}
 
             </div>
 
@@ -4181,6 +4232,165 @@ interface WinnerPaymentDetailsFormProps {
 type PaymentMethodType = 'UPI' | 'Bank' | 'Crypto' | 'PayPal' | 'Cash' | 'Other'
 
 export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPaymentDetailsFormProps) {
+  // Fixed to Bank Transfer only
+  const [methodType] = useState<PaymentMethodType>('Bank')
+  const [instructions, setInstructions] = useState(cycle.payment_instructions || '')
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
+
+  // UK Bank Transfer fields only
+  const [accountNumber, setAccountNumber] = useState(cycle.payment_details?.account_number || '')
+  const [ifsc, setIfsc] = useState(cycle.payment_details?.ifsc || '') // Sort Code
+  const [accountName, setAccountName] = useState(cycle.payment_details?.account_name || '')
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    setMessage(null)
+
+    // Only Bank Transfer supported
+    const details = {
+      account_number: accountNumber.trim(),
+      ifsc: ifsc.trim(), // Sort code stored in ifsc field
+      account_name: accountName.trim(),
+    }
+
+    const result = await saveWinnerPaymentDetails(cycle.id, groupId, {
+      methodType: 'Bank',
+      details,
+      instructions: instructions.trim(),
+    })
+
+    setLoading(false)
+
+    if (result.error) {
+      setMessage({ type: 'error', text: result.error })
+    } else {
+      setMessage({ type: 'success', text: 'Payment details saved successfully!' })
+    }
+  }
+
+  return (
+    <div className="bg-green-50 border-2 border-green-300 rounded-lg p-6">
+      <div className="flex items-center gap-3 mb-4">
+        <span className="text-2xl">🏆</span>
+        <div>
+          <h3 className="text-lg font-bold text-green-900">You're the Winner of Cycle {cycle.cycle_number}!</h3>
+          <p className="text-sm text-green-700">
+            Provide your payment details so members know where to send £{cycle.winning_bid_amount?.toLocaleString('en-GB')}
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Payment Method Label - Fixed to UK Bank Transfer */}
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <p className="text-sm font-medium text-blue-900">
+            💷 Payment Method: UK Bank Transfer
+          </p>
+        </div>
+
+        {/* UK Bank Transfer Fields */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Account Holder Name <span className="text-red-500">*</span>
+          </label>
+          <input
+            type="text"
+            value={accountName}
+            onChange={(e) => setAccountName(e.target.value)}
+            placeholder="John Doe"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            required
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Account Number <span className="text-red-500">*</span>
+          </label>
+          <input
+            type="text"
+            value={accountNumber}
+            onChange={(e) => setAccountNumber(e.target.value)}
+            placeholder="12345678"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            required
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Sort Code <span className="text-red-500">*</span>
+          </label>
+          <input
+            type="text"
+            value={ifsc}
+            onChange={(e) => setIfsc(e.target.value)}
+            placeholder="12-34-56"
+            maxLength={8}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            required
+          />
+        </div>
+
+        {/* Additional Instructions */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Additional Instructions (Optional)
+          </label>
+          <textarea
+            value={instructions}
+            onChange={(e) => setInstructions(e.target.value)}
+            placeholder='e.g., "Please add ROSCA-Cycle7 in payment reference"'
+            rows={2}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+          />
+        </div>
+
+        {/* Submit Button */}
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loading ? 'Saving...' : cycle.payment_method_type ? 'Update Payment Details' : 'Save Payment Details'}
+        </button>
+
+        {/* Message */}
+        {message && (
+          <div className={`p-3 rounded-lg text-sm ${
+            message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+          }`}>
+            {message.text}
+          </div>
+        )}
+      </form>
+    </div>
+  )
+}
+
+-e 
+
+##### FILE: src/components/dashboard/WinnerPaymentDetailsForm1.txt
+
+'use client'
+
+
+import { useState } from 'react'
+import { saveWinnerPaymentDetails } from '@/app/dashboard/groups/[id]/cycle-actions'
+
+
+interface WinnerPaymentDetailsFormProps {
+  cycle: any
+  groupId: string
+}
+
+
+type PaymentMethodType = 'UPI' | 'Bank' | 'Crypto' | 'PayPal' | 'Cash' | 'Other'
+
+
+export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPaymentDetailsFormProps) {
   const [methodType, setMethodType] = useState<PaymentMethodType>(
     cycle.payment_method_type || 'UPI'
   )
@@ -4188,9 +4398,11 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
 
+
   // UPI fields
   const [upiId, setUpiId] = useState(cycle.payment_details?.upi_id || '')
   const [upiPhone, setUpiPhone] = useState(cycle.payment_details?.phone || '')
+
 
   // Bank fields
   const [accountNumber, setAccountNumber] = useState(cycle.payment_details?.account_number || '')
@@ -4198,28 +4410,35 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
   const [bankName, setBankName] = useState(cycle.payment_details?.bank_name || '')
   const [accountName, setAccountName] = useState(cycle.payment_details?.account_name || '')
 
+
   // Crypto fields
   const [cryptoCurrency, setCryptoCurrency] = useState(cycle.payment_details?.currency || 'USDT')
   const [cryptoNetwork, setCryptoNetwork] = useState(cycle.payment_details?.network || 'TRC20')
   const [cryptoAddress, setCryptoAddress] = useState(cycle.payment_details?.address || '')
 
+
   // PayPal fields
   const [paypalEmail, setPaypalEmail] = useState(cycle.payment_details?.email || '')
+
 
   // Cash fields
   const [cashLocation, setCashLocation] = useState(cycle.payment_details?.location || '')
   const [cashContact, setCashContact] = useState(cycle.payment_details?.contact || '')
 
+
   // Other fields
   const [otherMethod, setOtherMethod] = useState(cycle.payment_details?.method || '')
   const [otherDetails, setOtherDetails] = useState(cycle.payment_details?.details || '')
+
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
     setMessage(null)
 
+
     let details: Record<string, any> = {}
+
 
     // Build details object based on method type
     switch (methodType) {
@@ -4263,13 +4482,16 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
         break
     }
 
+
     const result = await saveWinnerPaymentDetails(cycle.id, groupId, {
       methodType,
       details,
       instructions: instructions.trim(),
     })
 
+
     setLoading(false)
+
 
     if (result.error) {
       setMessage({ type: 'error', text: result.error })
@@ -4277,6 +4499,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
       setMessage({ type: 'success', text: 'Payment details saved successfully!' })
     }
   }
+
 
   const renderMethodFields = () => {
     switch (methodType) {
@@ -4312,6 +4535,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
             </div>
           </>
         )
+
 
       case 'Bank':
         return (
@@ -4371,6 +4595,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
           </>
         )
 
+
       case 'Crypto':
         return (
           <>
@@ -4423,6 +4648,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
           </>
         )
 
+
       case 'PayPal':
         return (
           <div>
@@ -4439,6 +4665,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
             />
           </div>
         )
+
 
       case 'Cash':
         return (
@@ -4471,6 +4698,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
             </div>
           </>
         )
+
 
       case 'Other':
         return (
@@ -4506,6 +4734,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
     }
   }
 
+
   return (
     <div className="bg-green-50 border-2 border-green-300 rounded-lg p-6">
       <div className="flex items-center gap-3 mb-4">
@@ -4513,10 +4742,11 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
         <div>
           <h3 className="text-lg font-bold text-green-900">You're the Winner of Cycle {cycle.cycle_number}!</h3>
           <p className="text-sm text-green-700">
-            Provide your payment details so members know where to send ₹{cycle.winning_bid_amount?.toLocaleString('en-IN')}
+            Provide your payment details so members know where to send £{cycle.winning_bid_amount?.toLocaleString('en-GB')}
           </p>
         </div>
       </div>
+
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Payment Method Selector */}
@@ -4539,8 +4769,10 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
           </select>
         </div>
 
+
         {/* Dynamic Fields Based on Method */}
         {renderMethodFields()}
+
 
         {/* Additional Instructions */}
         <div>
@@ -4556,6 +4788,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
           />
         </div>
 
+
         {/* Submit Button */}
         <button
           type="submit"
@@ -4564,6 +4797,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
         >
           {loading ? 'Saving...' : cycle.payment_method_type ? 'Update Payment Details' : 'Save Payment Details'}
         </button>
+
 
         {/* Message */}
         {message && (
@@ -4577,6 +4811,7 @@ export default function WinnerPaymentDetailsForm({ cycle, groupId }: WinnerPayme
     </div>
   )
 }
+
 -e 
 
 ##### FILE: src/components/dashboard/StartCycleButton.tsx
@@ -4686,16 +4921,16 @@ export default function GroupDetails({
 }) {
   // Format currency for Indian context
   const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-IN', {
+    return new Intl.NumberFormat('en-GB', {
       style: 'currency',
-      currency: 'INR',
+      currency: 'GBP',
       maximumFractionDigits: 0
     }).format(amount)
   }
 
   // Format date
   const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-IN', {
+    return new Date(dateString).toLocaleDateString('en-GB', {
       day: 'numeric',
       month: 'short',
       year: 'numeric'
@@ -4725,7 +4960,7 @@ export default function GroupDetails({
             )}
           </div>
           <span className={`px-3 py-1 rounded-full text-sm font-medium ${statusColors[group.status as keyof typeof statusColors]}`}>
-            {group.status.charAt(0).toUpperCase() + group.status.slice(1)}
+            {group.status === 'pending' ? 'In Progress' : group.status.charAt(0).toUpperCase() + group.status.slice(1)}
           </span>
         </div>
       </div>
@@ -4750,19 +4985,23 @@ export default function GroupDetails({
 
         {/* Allocation Method */}
         <div>
-          <p className="text-sm text-gray-500 mb-1">Allocation Method</p>
+          <p className="text-sm text-gray-500 mb-1">ROSCA Prize</p>
           <p className="text-lg font-semibold text-gray-900 capitalize">
-            {group.allocation_method}
+            {formatCurrency(group.contribution_amount * group.total_slots)}
           </p>
         </div>
 
-        {/* Available Slots */}
+        {/* Fees */}
         <div>
-          <p className="text-sm text-gray-500 mb-1">Available Slots</p>
+          <p className="text-sm text-gray-500 mb-1">Fees</p>
           <p className="text-lg font-semibold text-gray-900">
-            {availableSlots} remaining
+            <span className="line-through text-gray-400 mr-2">1%</span>
+            <span className="text-gray-400">→</span>
+            <span className="text-green-600"> 0%</span>
           </p>
+          {/*<p className="text-xs text-green-600 mt-1">🎉 Launch Offer!</p>*/}
         </div>
+
 
         {/* Start Date */}
         {group.start_date && (
@@ -5238,20 +5477,21 @@ export default function MobileMenu({ isOpen, onClose, user, isAdmin }: MobileMen
                   <span className="font-medium">My Groups</span>
                 </button>
               </li>
-              <li>
-                <button
-                  onClick={() => {
-                    router.push('/dashboard/profile')
-                    onClose()
-                  }}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
-                >
-                  <svg className="w-5 h-5" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
-                    <path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
-                  </svg>
-                  <span className="font-medium">Profile</span>
-                </button>
-              </li>
+                  {/* HIDDEN FOR SOFT LAUNCH */}
+                    {/* <li>
+                      <buttononClick={() => {
+                        router.push('/dashboard/profile')
+                        onClose()
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                      >
+                        <svg className="w-5 h-5" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+                        <path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                        </svg>
+                      <span className="font-medium">Profile</span>
+                    </button>
+                </li> */}
+
             </ul>
           </nav>
 
@@ -5357,715 +5597,7 @@ export default function Header({ user, isAdmin }: HeaderProps) {  // 👈 ADD is
 
 -e 
 
-##### FILE: src/components/dashboard/BiddingBox.tsx
-
-'use client'
-
-import { useState, useEffect } from 'react'
-import { placeBid } from '@/app/dashboard/groups/[id]/cycle-actions'
-import { createClient } from '@/lib/supabase/client'
-
-export default function BiddingBox({ 
-  cycle, 
-  group, 
-  currentUser 
-}: { 
-  cycle: any
-  group: any
-  currentUser: any
-}) {
-  const [bidAmount, setBidAmount] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [lowestBid, setLowestBid] = useState<number>(cycle.winning_bid_amount)
-  const [recentBids, setRecentBids] = useState<any[]>([])
-  const [isMember, setIsMember] = useState(false)
-  const [hasMemberReceived, setHasMemberReceived] = useState(false)
-  
-  const supabase = createClient()
-
-  // ✅ NEW: Check if current user is actually a member
-  useEffect(() => {
-    const checkMemberStatus = async () => {
-      const { data: member } = await supabase
-        .from('rosca_members')
-        .select('has_received')
-        .eq('rosca_id', group.id)
-        .eq('user_id', currentUser.id)
-        .single()
-      
-      if (member) {
-        setIsMember(true)
-        setHasMemberReceived(member.has_received)
-      } else {
-        setIsMember(false)
-        setHasMemberReceived(false)
-      }
-    }
-
-    checkMemberStatus()
-  }, [group.id, currentUser.id])
-
-  useEffect(() => {
-    fetchBids()
-
-    // Real-time subscription for new bids
-    const channel = supabase
-      .channel(`bids-${cycle.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'cycle_bids',
-          filter: `cycle_id=eq.${cycle.id}`
-        },
-        () => {
-          fetchBids()
-        }
-      )
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [cycle.id])
-
-  const fetchBids = async () => {
-    // Fetch lowest bid
-    const { data: lowest } = await supabase
-      .from('cycle_bids')
-      .select('bid_amount')
-      .eq('cycle_id', cycle.id)
-      .order('bid_amount', { ascending: true })
-      .limit(1)
-      .single()
-
-    if (lowest) {
-      setLowestBid(lowest.bid_amount)
-    } else {
-      setLowestBid(cycle.winning_bid_amount)
-    }
-
-    // Fetch recent bids with user profiles
-    const { data: bidsData } = await supabase
-      .from('cycle_bids')
-      .select('id, bid_amount, created_at, user_id')
-      .eq('cycle_id', cycle.id)
-      .order('created_at', { ascending: false })
-      .limit(10)
-
-    if (bidsData) {
-      // Fetch profiles separately
-      const userIds = bidsData.map(b => b.user_id)
-      const { data: profiles } = await supabase
-        .from('profiles')
-        .select('id, full_name')
-        .in('id', userIds)
-
-      // Combine bids with profiles
-      const bidsWithProfiles = bidsData.map(bid => ({
-        ...bid,
-        profile: profiles?.find(p => p.id === bid.user_id)
-      }))
-
-      setRecentBids(bidsWithProfiles)
-    }
-  }
-
-  const handlePlaceBid = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError('')
-
-    const amount = parseFloat(bidAmount)
-
-    if (isNaN(amount) || amount <= 0) {
-      setError('Please enter a valid amount')
-      return
-    }
-
-    if (amount >= lowestBid) {
-      setError(`Bid must be lower than ₹${lowestBid.toLocaleString('en-IN')}`)
-      return
-    }
-
-    setLoading(true)
-    const result = await placeBid(cycle.id, amount, group.id)
-    setLoading(false)
-
-    if (result.error) {
-      setError(result.error)
-    } else {
-      setBidAmount('')
-      fetchBids()
-    }
-  }
-
-  // ✅ Check if user is creator/admin (even if not a member)
-  const isCreator = group.created_by === currentUser.id
-
-  return (
-    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-      <h3 className="text-lg font-semibold text-gray-900 mb-4">🎯 Bidding</h3>
-
-      {/* Current Lowest Bid Display */}
-      <div className="bg-gradient-to-r from-yellow-50 to-orange-50 border-2 border-yellow-300 rounded-lg p-6 mb-6">
-        <p className="text-sm text-yellow-800 mb-2">Current Lowest Bid</p>
-        <p className="text-4xl font-bold text-yellow-900">
-          ₹{lowestBid.toLocaleString('en-IN')}
-        </p>
-        <p className="text-xs text-yellow-700 mt-2">
-          {recentBids.length > 0 ? `${recentBids.length} bid(s) placed` : 'No bids yet - be the first!'}
-        </p>
-      </div>
-
-      {/* ✅ NEW: Show different UI for non-member admins */}
-      {!isMember && isCreator ? (
-        <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4 mb-6">
-          <p className="text-sm text-blue-800 font-medium">
-            👁️ Monitoring as banker (non-participant)
-          </p>
-          <p className="text-xs text-blue-700 mt-1">
-            You can view bids but cannot place bids since you're not participating in this cycle.
-          </p>
-        </div>
-      ) : !isMember ? (
-        <div className="bg-gray-50 border-2 border-gray-200 rounded-lg p-4 mb-6">
-          <p className="text-sm text-gray-700">
-            You are not a member of this group
-          </p>
-        </div>
-      ) : hasMemberReceived ? (
-        <div className="bg-green-50 border-2 border-green-300 rounded-lg p-4 mb-6">
-          <p className="text-sm text-green-800 font-medium">
-            ✅ You have already received your payout
-          </p>
-          <p className="text-xs text-green-700 mt-1">
-            You cannot bid in future cycles
-          </p>
-        </div>
-      ) : (
-        /* Bidding Form - Only for eligible members */
-        <form onSubmit={handlePlaceBid} className="space-y-4 mb-6">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Your Bid Amount
-            </label>
-            <div className="relative">
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
-              <input
-                type="number"
-                value={bidAmount}
-                onChange={(e) => setBidAmount(e.target.value)}
-                placeholder={`Less than ${lowestBid}`}
-                className="w-full pl-8 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
-            {error && (
-              <p className="text-sm text-red-600 mt-2">{error}</p>
-            )}
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-3 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-white font-semibold rounded-lg shadow-md hover:shadow-lg transition-all disabled:opacity-50"
-          >
-            {loading ? 'Placing Bid...' : 'Place Bid'}
-          </button>
-        </form>
-      )}
-
-      {/* Recent Bids */}
-      {recentBids.length > 0 && (
-        <div>
-          <h4 className="text-sm font-semibold text-gray-700 mb-3">Recent Bids</h4>
-          <div className="space-y-2 max-h-60 overflow-y-auto">
-            {recentBids.map((bid, index) => (
-              <div
-                key={bid.id}
-                className={`flex items-center justify-between p-3 rounded-lg ${
-                  index === 0
-                    ? 'bg-yellow-100 border-2 border-yellow-300'
-                    : 'bg-gray-50 border border-gray-200'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  {index === 0 && (
-                    <span className="text-xl">🏆</span>
-                  )}
-                  <div>
-                    <p className="font-semibold text-gray-900">
-                      {bid.profile?.full_name || 'Unknown'}
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      {new Date(bid.created_at).toLocaleString('en-IN', {
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                      })}
-                    </p>
-                  </div>
-                </div>
-                <p className={`font-bold ${index === 0 ? 'text-yellow-900' : 'text-gray-700'}`}>
-                  ₹{bid.bid_amount.toLocaleString('en-IN')}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-
--e 
-
-##### FILE: src/components/dashboard/PaymentTracker.tsx
-
-'use client'
-
-import { useState, useEffect } from 'react'
-import { markPaymentMade } from '@/app/dashboard/groups/[id]/cycle-actions'
-import { createClient } from '@/lib/supabase/client'
-
-/**
- * PaymentTracker - Shows payment status for current user
- * Allows member to mark "I Paid"
- * Shows if receiver has verified the payment
- */
-export default function PaymentTracker({ 
-  cycle, 
-  currentUser, 
-  isReceiver,
-  group  // ← ADD THIS
-}: any) {
-
-  const [payment, setPayment] = useState<any>(null)
-  const [loading, setLoading] = useState(false)
-  const supabase = createClient()
-
-useEffect(() => {
-  console.log('🔄 PaymentTracker mounted. Cycle:', cycle)
-  console.log('👤 Current user:', currentUser)
-  console.log('🏢 Group:', group)
-  fetchPaymentStatus()
-  // ... rest of existing code
-
-    
-    // Real-time subscription for payment updates
-    const channel = supabase
-      .channel(`payment-${cycle.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'cycle_payments',
-          filter: `cycle_id=eq.${cycle.id}`
-        },
-        () => {
-          fetchPaymentStatus()
-        }
-      )
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [cycle.id])
-
-const fetchPaymentStatus = async () => {
-  // Step 1: Get current user's member record
-  const { data: member } = await supabase
-    .from('rosca_members')
-    .select('id')
-    .eq('rosca_id', cycle.rosca_id)
-    .eq('user_id', currentUser.id)
-    .single()
-
-  if (!member) {
-    setPayment(null)
-    return
-  }
-
-  // Step 2: Get payment record using member_id
-  const { data } = await supabase
-    .from('cycle_payments')
-    .select('*')
-    .eq('cycle_id', cycle.id)
-    .eq('member_id', member.id)
-    .single()
-
-  setPayment(data)
-}
-
-
-const handleMarkPaid = async () => {
-  console.log('🔘 Button clicked! Cycle:', cycle.id, 'Rosca:', cycle.rosca_id)
-  setLoading(true)
-  const result = await markPaymentMade(cycle.id, cycle.rosca_id)
-  console.log('📥 Result from markPaymentMade:', result)
-  setLoading(false)
-}
-
-
-  if (isReceiver) {
-    return (
-      <div className="bg-gradient-to-r from-green-50 to-green-100 border-2 border-green-300 rounded-lg p-6">
-        <div className="flex items-center gap-3 mb-2">
-          <div className="w-10 h-10 bg-green-500 rounded-full flex items-center justify-center">
-            <span className="text-white text-xl">👑</span>
-          </div>
-          <div>
-            <p className="font-semibold text-green-900">You are the receiver</p>
-            <p className="text-sm text-green-700">
-              Collect payments from all members
-            </p>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-      <h3 className="text-lg font-semibold text-gray-900 mb-4">
-        Your Payment Status
-      </h3>
-
-      {!payment?.has_paid ? (
-        <div className="space-y-4">
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-            <p className="text-sm text-yellow-800 mb-3">
-              💰 Please send ₹{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-IN')} to the receiver
-            </p>
-
-            <button
-              onClick={handleMarkPaid}
-              disabled={loading || payment?.has_paid}
-
-              className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors disabled:opacity-50"
-            >
-              {loading ? 'Marking...' : '✓ I Paid'}
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {/* Paid Confirmation */}
-          <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-2xl">✓</span>
-              <span className="font-semibold text-green-900">
-                Payment Marked
-              </span>
-            </div>
-            <p className="text-sm text-green-700">
-              You marked this payment as completed
-            </p>
-          </div>
-
-          {/* Verification Status */}
-          {payment.verified_by_receiver ? (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">🎉</span>
-                <span className="font-semibold text-blue-900">
-                  Verified by Receiver
-                </span>
-              </div>
-            </div>
-          ) : payment.verified_by_admin ? (
-            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">⭐</span>
-                <span className="font-semibold text-purple-900">
-                  Verified by Admin
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-              <p className="text-sm text-gray-600">
-                ⏳ Waiting for receiver to verify...
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
--e 
-
-##### FILE: src/components/dashboard/CycleManager.tsx
-
-'use client'
-
-import { useState } from 'react'
-import BiddingBox from './BiddingBox'
-import PaymentTracker from './PaymentTracker'
-import ActivityFeed from './ActivityFeed'
-import VerificationPanel from './VerificationPanel'
-import AdminOverduePanel from './AdminOverduePanel'
-import StartBiddingButton from './StartBiddingButton'
-import EndBiddingButton from './EndBiddingButton'
-import EndPaymentButton from './EndpaymentButton'
-import WinnerPaymentDetailsForm from './WinnerPaymentDetailsForm'
-import PaymentDetailsDisplay from './PaymentDetailsDisplay'
-
-/**
- * CycleManager - Main container for current cycle
- * Shows different UI based on:
- * - Cycle status (pending/bidding/payment/overdue/completed)
- * - Allocation method (bidding/random/banker)
- * - User role (member/receiver/admin)
- */
-export default function CycleManager({
-  cycle,
-  group,
-  currentUser,
-  isAdmin,
-  isReceiver,
-  hasMemberReceived,
-}: {
-  cycle: any
-  group: any
-  currentUser: any
-  isAdmin: boolean
-  isReceiver: boolean
-  hasMemberReceived: boolean
-}) {
-  const [activeTab, setActiveTab] = useState('activity') // 'payment' | 'activity'
-
-  // Status checks
-  const isPending = cycle.status === 'pending'
-  const isBidding = cycle.status === 'bidding'
-  const isPayment = cycle.status === 'payment'
-  const isOverdue = cycle.status === 'overdue'
-  const isCompleted = cycle.status === 'completed'
-
-  // ✅ Check if user is actually a member (not just creator)
-  const isMember = hasMemberReceived !== undefined // If has_received exists, they're a member
-  const isCreator = group.created_by === currentUser.id
-
-  // UI visibility
-  const showBidding = group.allocation_method === 'bidding' && isBidding
-  const showPayment = isPayment || isOverdue
-
-  return (
-    <div className="space-y-4">
-      {/* Cycle Header */}
-      <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-lg p-6 text-white">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-bold">Cycle {cycle.cycle_number}</h2>
-            <p className="text-blue-100 mt-1">
-              {isPending && 'Waiting to start bidding phase'}
-              {isBidding && 'Bidding Phase Active'}
-              {isPayment && 'Payment Phase - Send contributions'}
-              {isOverdue && 'Payment Deadline Passed'}
-              {isCompleted && 'Cycle Completed'}
-            </p>
-          </div>
-
-          <div className="text-right">
-            <span className={`px-4 py-2 rounded-full text-sm font-semibold ${
-              isPending ? 'bg-gray-400 text-gray-900' :
-              isBidding ? 'bg-yellow-400 text-yellow-900' :
-              isPayment ? 'bg-green-400 text-green-900' :
-              isOverdue ? 'bg-red-400 text-red-900' :
-              'bg-blue-400 text-blue-900'
-            }`}>
-              {cycle.status.toUpperCase()}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Admin Control Panel - Shows different button based on status */}
-      {(isAdmin || group.created_by === currentUser.id) && (
-        <div className="bg-white rounded-lg border-2 border-blue-200 p-6">
-          <h3 className="text-lg font-bold text-gray-900 mb-4">📊 Admin Controls</h3>
-
-          {/* Status: PENDING - Show Start Bidding Button */}
-          {isPending && (
-            <div className="space-y-3">
-              <p className="text-sm text-gray-600">
-                Ready to start the cycle? Click below to open bidding for members.
-              </p>
-              <StartBiddingButton cycleId={cycle.id} groupId={group.id} />
-            </div>
-          )}
-
-          {/* Status: BIDDING - Show End Bidding Button */}
-          {isBidding && (
-            <div className="space-y-3">
-              <p className="text-sm text-gray-600">
-                Bidding is open. When ready, end bidding to select winner and start payment phase.
-              </p>
-              <EndBiddingButton cycleId={cycle.id} groupId={group.id} />
-            </div>
-          )}
-
-          {/* Status: PAYMENT - Show Complete Cycle Button */}
-          {(isPayment || isOverdue) && (
-            <div className="space-y-3">
-              <p className="text-sm text-gray-600">
-                Once all payments are verified, complete the cycle to move to the next round.
-              </p>
-              <EndPaymentButton cycleId={cycle.id} groupId={group.id} />
-            </div>
-          )}
-
-          {/* Status: COMPLETED */}
-          {isCompleted && (
-            <div className="text-center p-4 bg-green-50 rounded-lg">
-              <p className="text-green-700 font-medium">
-                ✅ Cycle {cycle.cycle_number} completed successfully!
-              </p>
-              <p className="text-sm text-gray-600 mt-2">
-                You can start a new cycle when ready.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Pending State - Info for regular members (non-admins, non-creators) */}
-      {isPending && !isAdmin && group.created_by !== currentUser.id && (
-        <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6 text-center">
-          <p className="text-yellow-800 font-medium">
-            ⏳ Waiting for admin to start bidding phase...
-          </p>
-          <p className="text-sm text-yellow-700 mt-2">
-            You'll be notified when bidding opens.
-          </p>
-        </div>
-      )}
-
-      {/* ✅ FIXED: Bidding Box - Show to members OR admins (even non-participating) */}
-      {showBidding && (isMember ? !hasMemberReceived : isCreator || isAdmin) && (
-        <BiddingBox 
-          cycle={cycle} 
-          group={group} 
-          currentUser={currentUser} 
-        />
-      )}
-
-      {/* Tab Navigation */}
-      {!isPending && (
-        <div className="flex gap-2 border-b border-gray-200">
-          <button
-            onClick={() => setActiveTab('activity')}
-            className={`px-4 py-3 font-medium transition-colors ${
-              activeTab === 'activity'
-                ? 'border-b-2 border-blue-600 text-blue-600'
-                : 'text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            📋 Activity Feed
-          </button>
-
-          {showPayment && (
-            <button
-              onClick={() => setActiveTab('payment')}
-              className={`px-4 py-3 font-medium transition-colors ${
-                activeTab === 'payment'
-                  ? 'border-b-2 border-blue-600 text-blue-600'
-                  : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              💰 Payments
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Content */}
-      {!isPending && (
-        <>
-          {/* ✅ FIXED: Activity Feed - Always show (no member check) */}
-          {activeTab === 'activity' && <ActivityFeed cycleId={cycle.id} />}
-
-          {/* Payment Tab */}
-          {activeTab === 'payment' && showPayment && (
-            <div className="space-y-4">
-              {/* ✅ NEW: Winner Payment Details Form - Only show to winner */}
-              {isReceiver && (
-                <WinnerPaymentDetailsForm cycle={cycle} groupId={group.id} />
-              )}
-
-              {/* ✅ NEW: Display Payment Details to Other Members */}
-              {!isReceiver && isMember && !(!group.creatorparticipates && isCreator) && (
-                <PaymentDetailsDisplay cycle={cycle} />
-              )}
-
-              {/* ✅ FIXED: Payment Tracker - Only for actual members who are participants */}
-              {isMember && !(!group.creatorparticipates && isCreator) && (
-                <PaymentTracker
-                  cycle={cycle}
-                  currentUser={currentUser}
-                  isReceiver={isReceiver}
-                  group={group}
-                />
-              )}
-
-              {/* Verification Panel for receiver */}
-              {isReceiver && !isOverdue && (
-                <VerificationPanel cycle={cycle} groupId={group.id} />
-              )}
-
-              {/* Admin Panel for overdue payments */}
-              {isAdmin && isOverdue && (
-                <AdminOverduePanel cycle={cycle} groupId={group.id} />
-              )}
-
-              {/* ✅ FIXED: Non-participating admin view - with verification panel */}
-              {!isMember && (isCreator || isAdmin) && (
-                <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-6">
-                  <div className="flex items-center gap-3 mb-4">
-                    <span className="text-2xl">🎯</span>
-                    <div>
-                      <p className="text-blue-900 font-semibold">
-                        Managing as Banker (Non-Participant)
-                      </p>
-                      <p className="text-sm text-blue-700 mt-1">
-                        You're managing this group without participating in payments.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Show payment details to admin */}
-                  <PaymentDetailsDisplay cycle={cycle} />
-                  
-                  {/* Allow admin to verify payments even if not participating */}
-                  {!isOverdue && (
-                    <div className="mt-4">
-                      <VerificationPanel cycle={cycle} groupId={group.id} />
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  )
-}
-
-
-
-
-
--e 
-
-##### FILE: src/components/dashboard/PaymentDetailsDisplay.tsx
+##### FILE: src/components/dashboard/PaymentDetailsDisplay.txt
 
 'use client'
 
@@ -6073,9 +5605,12 @@ import { useState } from 'react'
 
 interface PaymentDetailsDisplayProps {
   cycle: any
+  group: any
 }
 
-export default function PaymentDetailsDisplay({ cycle }: PaymentDetailsDisplayProps) {
+
+export default function PaymentDetailsDisplay({ cycle, group }: PaymentDetailsDisplayProps) {
+
   const [copiedField, setCopiedField] = useState<string | null>(null)
 
   const copyToClipboard = async (text: string, fieldName: string) => {
@@ -6248,16 +5783,845 @@ export default function PaymentDetailsDisplay({ cycle }: PaymentDetailsDisplayPr
           </div>
         )}
 
+            <div className="bg-blue-100 rounded-lg p-3 mt-4">
+                <p className="text-sm text-blue-800">
+                 <strong>Your Share:</strong> £{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+                <p className="text-xs text-blue-600 mt-1">
+                        (Total pot: £{cycle.winning_bid_amount?.toLocaleString('en-GB')} ÷ {group.total_slots} members)
+                </p>
+            </div>
+
+      </div>
+    </div>
+  )
+}-e 
+
+##### FILE: src/components/dashboard/BiddingBox.tsx
+
+'use client'
+
+import { useState, useEffect } from 'react'
+import { placeBid } from '@/app/dashboard/groups/[id]/cycle-actions'
+import { createClient } from '@/lib/supabase/client'
+
+export default function BiddingBox({ 
+  cycle, 
+  group, 
+  currentUser 
+}: { 
+  cycle: any
+  group: any
+  currentUser: any
+}) {
+  const [bidAmount, setBidAmount] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [lowestBid, setLowestBid] = useState<number>(cycle.winning_bid_amount)
+  const [recentBids, setRecentBids] = useState<any[]>([])
+  const [isMember, setIsMember] = useState(false)
+  const [hasMemberReceived, setHasMemberReceived] = useState(false)
+  
+  const supabase = createClient()
+
+  // ✅ NEW: Check if current user is actually a member
+  useEffect(() => {
+    const checkMemberStatus = async () => {
+      const { data: member } = await supabase
+        .from('rosca_members')
+        .select('has_received')
+        .eq('rosca_id', group.id)
+        .eq('user_id', currentUser.id)
+        .single()
+      
+      if (member) {
+        setIsMember(true)
+        setHasMemberReceived(member.has_received)
+      } else {
+        setIsMember(false)
+        setHasMemberReceived(false)
+      }
+    }
+
+    checkMemberStatus()
+  }, [group.id, currentUser.id])
+
+  useEffect(() => {
+    fetchBids()
+
+    // Real-time subscription for new bids
+    const channel = supabase
+      .channel(`bids-${cycle.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'cycle_bids',
+          filter: `cycle_id=eq.${cycle.id}`
+        },
+        () => {
+          fetchBids()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [cycle.id])
+
+  const fetchBids = async () => {
+    // Fetch lowest bid
+    const { data: lowest } = await supabase
+      .from('cycle_bids')
+      .select('bid_amount')
+      .eq('cycle_id', cycle.id)
+      .order('bid_amount', { ascending: true })
+      .limit(1)
+      .single()
+
+    if (lowest) {
+      setLowestBid(lowest.bid_amount)
+    } else {
+      setLowestBid(cycle.winning_bid_amount)
+    }
+
+    // Fetch recent bids with user profiles
+    const { data: bidsData } = await supabase
+      .from('cycle_bids')
+      .select('id, bid_amount, created_at, user_id')
+      .eq('cycle_id', cycle.id)
+      .order('created_at', { ascending: false })
+      .limit(10)
+
+    if (bidsData) {
+      // Fetch profiles separately
+      const userIds = bidsData.map(b => b.user_id)
+      const { data: profiles } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .in('id', userIds)
+
+      // Combine bids with profiles
+      const bidsWithProfiles = bidsData.map(bid => ({
+        ...bid,
+        profile: profiles?.find(p => p.id === bid.user_id)
+      }))
+
+      setRecentBids(bidsWithProfiles)
+    }
+  }
+
+  const handlePlaceBid = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
+
+    const amount = parseFloat(bidAmount)
+
+    if (isNaN(amount) || amount <= 0) {
+      setError('Please enter a valid amount')
+      return
+    }
+
+    if (amount >= lowestBid) {
+      setError(`Bid must be lower than £${lowestBid.toLocaleString('en-GB')}`)
+      return
+    }
+
+    setLoading(true)
+    const result = await placeBid(cycle.id, amount, group.id)
+    setLoading(false)
+
+    if (result.error) {
+      setError(result.error)
+    } else {
+      setBidAmount('')
+      fetchBids()
+    }
+  }
+
+  // ✅ Check if user is creator/admin (even if not a member)
+  const isCreator = group.created_by === currentUser.id
+
+  return (
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <h3 className="text-lg font-semibold text-gray-900 mb-4">🎯 Bidding</h3>
+
+      {/* Current Lowest Bid Display */}
+      <div className="bg-gradient-to-r from-yellow-50 to-orange-50 border-2 border-yellow-300 rounded-lg p-6 mb-6">
+        <p className="text-sm text-yellow-800 mb-2">Current Lowest Bid</p>
+        <p className="text-4xl font-bold text-yellow-900">
+          £{lowestBid.toLocaleString('en-GB')}
+        </p>
+        <p className="text-xs text-yellow-700 mt-2">
+          {recentBids.length > 0 ? `${recentBids.length} bid(s) placed` : 'No bids yet - be the first!'}
+        </p>
+      </div>
+
+      {/* ✅ NEW: Show different UI for non-member admins */}
+      {!isMember && isCreator ? (
+        <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4 mb-6">
+          <p className="text-sm text-blue-800 font-medium">
+            👁️ Monitoring as banker (non-participant)
+          </p>
+          <p className="text-xs text-blue-700 mt-1">
+            You can view bids but cannot place bids since you're not participating in this cycle.
+          </p>
+        </div>
+      ) : !isMember ? (
+        <div className="bg-gray-50 border-2 border-gray-200 rounded-lg p-4 mb-6">
+          <p className="text-sm text-gray-700">
+            You are not a member of this group
+          </p>
+        </div>
+      ) : hasMemberReceived ? (
+        <div className="bg-green-50 border-2 border-green-300 rounded-lg p-4 mb-6">
+          <p className="text-sm text-green-800 font-medium">
+            ✅ You have already received your payout
+          </p>
+          <p className="text-xs text-green-700 mt-1">
+            You cannot bid in future cycles
+          </p>
+        </div>
+      ) : (
+        /* Bidding Form - Only for eligible members */
+        <form onSubmit={handlePlaceBid} className="space-y-4 mb-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Your Bid Amount
+            </label>
+            <div className="relative">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+              <input
+                type="number"
+                value={bidAmount}
+                onChange={(e) => setBidAmount(e.target.value)}
+                placeholder={`Less than ${lowestBid}`}
+                className="w-full pl-8 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                required
+              />
+            </div>
+            {error && (
+              <p className="text-sm text-red-600 mt-2">{error}</p>
+            )}
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-3 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-white font-semibold rounded-lg shadow-md hover:shadow-lg transition-all disabled:opacity-50"
+          >
+            {loading ? 'Placing Bid...' : 'Place Bid'}
+          </button>
+        </form>
+      )}
+
+      {/* Recent Bids */}
+      {recentBids.length > 0 && (
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 mb-3">Recent Bids</h4>
+          <div className="space-y-2 max-h-60 overflow-y-auto">
+            {recentBids.map((bid, index) => (
+              <div
+                key={bid.id}
+                className={`flex items-center justify-between p-3 rounded-lg ${
+                  index === 0
+                    ? 'bg-yellow-100 border-2 border-yellow-300'
+                    : 'bg-gray-50 border border-gray-200'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  {index === 0 && (
+                    <span className="text-xl">🏆</span>
+                  )}
+                  <div>
+                    <p className="font-semibold text-gray-900">
+                      {bid.profile?.full_name || 'Unknown'}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {new Date(bid.created_at).toLocaleString('en-GB', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </p>
+                  </div>
+                </div>
+                <p className={`font-bold ${index === 0 ? 'text-yellow-900' : 'text-gray-700'}`}>
+                  £{bid.bid_amount.toLocaleString('en-GB')}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+-e 
+
+##### FILE: src/components/dashboard/PaymentTracker.tsx
+
+'use client'
+
+import { useState, useEffect } from 'react'
+import { markPaymentMade } from '@/app/dashboard/groups/[id]/cycle-actions'
+import { createClient } from '@/lib/supabase/client'
+
+/**
+ * PaymentTracker - Shows payment status for current user
+ * Allows member to mark "I Paid"
+ * Shows if receiver has verified the payment
+ */
+export default function PaymentTracker({ 
+  cycle, 
+  currentUser, 
+  isReceiver,
+  group  // ← ADD THIS
+}: any) {
+
+  const [payment, setPayment] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const supabase = createClient()
+
+useEffect(() => {
+  console.log('🔄 PaymentTracker mounted. Cycle:', cycle)
+  console.log('👤 Current user:', currentUser)
+  console.log('🏢 Group:', group)
+  fetchPaymentStatus()
+  // ... rest of existing code
+
+    
+    // Real-time subscription for payment updates
+    const channel = supabase
+      .channel(`payment-${cycle.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'cycle_payments',
+          filter: `cycle_id=eq.${cycle.id}`
+        },
+        () => {
+          fetchPaymentStatus()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [cycle.id])
+
+const fetchPaymentStatus = async () => {
+  // Step 1: Get current user's member record
+  const { data: member } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', cycle.rosca_id)
+    .eq('user_id', currentUser.id)
+    .single()
+
+  if (!member) {
+    setPayment(null)
+    return
+  }
+
+  // Step 2: Get payment record using member_id
+  const { data } = await supabase
+    .from('cycle_payments')
+    .select('*')
+    .eq('cycle_id', cycle.id)
+    .eq('member_id', member.id)
+    .single()
+
+  setPayment(data)
+}
+
+
+const handleMarkPaid = async () => {
+  console.log('🔘 Button clicked! Cycle:', cycle.id, 'Rosca:', cycle.rosca_id)
+  setLoading(true)
+  
+  // ✅ Optimistic UI update - immediately mark as paid
+  const previousPayment = payment
+  setPayment({ ...payment, has_paid: true })
+  
+  const result = await markPaymentMade(cycle.id, cycle.rosca_id)
+  console.log('📥 Result from markPaymentMade:', result)
+  
+  // ✅ If error, revert the optimistic update
+  if (result?.error) {
+    console.error('❌ Failed to mark payment:', result.error)
+    setPayment(previousPayment)
+  }
+  
+  setLoading(false)
+}
+
+
+
+  if (isReceiver) {
+    return (
+      <div className="bg-gradient-to-r from-green-50 to-green-100 border-2 border-green-300 rounded-lg p-6">
+        <div className="flex items-center gap-3 mb-2">
+          <div className="w-10 h-10 bg-green-500 rounded-full flex items-center justify-center">
+            <span className="text-white text-xl">👑</span>
+          </div>
+          <div>
+            <p className="font-semibold text-green-900">You are the receiver</p>
+            <p className="text-sm text-green-700">
+              Collect payments from all members
+            </p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <h3 className="text-lg font-semibold text-gray-900 mb-4">
+        Your Payment Status
+      </h3>
+
+      {!payment?.has_paid ? (
+        <div className="space-y-4">
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+            <p className="text-sm text-yellow-800 mb-3">
+              💰 Please send £{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-GB')} to the receiver
+            </p>
+
+          <button
+            onClick={handleMarkPaid}
+            disabled={loading || payment?.has_paid}
+            className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? 'Marking...' : '✓ I Paid'}
+          </button>
+
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {/* Paid Confirmation */}
+          <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-2xl">✓</span>
+              <span className="font-semibold text-green-900">
+                Payment Marked
+              </span>
+            </div>
+            <p className="text-sm text-green-700">
+              You marked this payment as completed
+            </p>
+          </div>
+
+          {/* Verification Status */}
+          {payment.verified_by_receiver ? (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🎉</span>
+                <span className="font-semibold text-blue-900">
+                  Verified by Receiver
+                </span>
+              </div>
+            </div>
+          ) : payment.verified_by_admin ? (
+            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">⭐</span>
+                <span className="font-semibold text-purple-900">
+                  Verified by Admin
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+              <p className="text-sm text-gray-600">
+                ⏳ Waiting for receiver to verify...
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+-e 
+
+##### FILE: src/components/dashboard/CycleManager.tsx
+
+'use client'
+
+import { useState } from 'react'
+import BiddingBox from './BiddingBox'
+import PaymentTracker from './PaymentTracker'
+import ActivityFeed from './ActivityFeed'
+import VerificationPanel from './VerificationPanel'
+import AdminOverduePanel from './AdminOverduePanel'
+import StartBiddingButton from './StartBiddingButton'
+import EndBiddingButton from './EndBiddingButton'
+import EndPaymentButton from './EndpaymentButton'
+import WinnerPaymentDetailsForm from './WinnerPaymentDetailsForm'
+import PaymentDetailsDisplay from './PaymentDetailsDisplay'
+
+/**
+ * CycleManager - Main container for current cycle
+ * Shows different UI based on:
+ * - Cycle status (pending/bidding/payment/overdue/completed)
+ * - Allocation method (bidding/random/banker)
+ * - User role (member/receiver/admin)
+ */
+export default function CycleManager({
+  cycle,
+  group,
+  currentUser,
+  isAdmin,
+  isReceiver,
+  hasMemberReceived,
+}: {
+  cycle: any
+  group: any
+  currentUser: any
+  isAdmin: boolean
+  isReceiver: boolean
+  hasMemberReceived: boolean
+}) {
+  const [activeTab, setActiveTab] = useState('activity') // 'payment' | 'activity'
+
+  // Status checks
+  const isPending = cycle.status === 'pending'
+  const isBidding = cycle.status === 'bidding'
+  const isPayment = cycle.status === 'payment'
+  const isOverdue = cycle.status === 'overdue'
+  const isCompleted = cycle.status === 'completed'
+
+  // ✅ Check if user is actually a member (not just creator)
+  const isMember = hasMemberReceived !== undefined // If has_received exists, they're a member
+  const isCreator = group.created_by === currentUser.id
+
+  // UI visibility
+  const showBidding = group.allocation_method === 'bidding' && isBidding
+  const showPayment = isPayment || isOverdue
+
+  return (
+    <div className="space-y-4">
+      {/* Cycle Header */}
+      <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-lg p-6 text-white">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-2xl font-bold">Cycle {cycle.cycle_number}/{group.total_slots}</h2>
+            <p className="text-blue-100 mt-1">
+              {isPending && 'Waiting to start bidding phase'}
+              {isBidding && 'Bidding Phase Active'}
+              {isPayment && 'Payment Phase - Send contributions'}
+              {isOverdue && 'Payment Deadline Passed'}
+              {isCompleted && 'Cycle Completed'}
+            </p>
+          </div>
+
+          <div className="text-right">
+            <span className={`px-4 py-2 rounded-full text-sm font-semibold ${
+              isPending ? 'bg-gray-400 text-gray-900' :
+              isBidding ? 'bg-yellow-400 text-yellow-900' :
+              isPayment ? 'bg-green-400 text-green-900' :
+              isOverdue ? 'bg-red-400 text-red-900' :
+              'bg-blue-400 text-blue-900'
+            }`}>
+              {cycle.status.toUpperCase()}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Admin Control Panel - Shows different button based on status */}
+      {(isAdmin || group.created_by === currentUser.id) && (
+        <div className="bg-white rounded-lg border-2 border-blue-200 p-6">
+          <h3 className="text-lg font-bold text-gray-900 mb-4">📊 Admin Controls</h3>
+
+          {/* Status: PENDING - Show Start Bidding Button */}
+          {isPending && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600">
+                Ready to start the cycle? Click below to open bidding for members.
+              </p>
+              <StartBiddingButton cycleId={cycle.id} groupId={group.id} />
+            </div>
+          )}
+
+          {/* Status: BIDDING - Show End Bidding Button */}
+          {isBidding && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600">
+                Bidding is open. When ready, end bidding to select winner and start payment phase.
+              </p>
+              <EndBiddingButton cycleId={cycle.id} groupId={group.id} />
+            </div>
+          )}
+
+          {/* Status: PAYMENT - Show Complete Cycle Button */}
+          {(isPayment || isOverdue) && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600">
+                Once all payments are verified, complete the cycle to move to the next round.
+              </p>
+              <EndPaymentButton cycleId={cycle.id} groupId={group.id} />
+            </div>
+          )}
+
+          {/* Status: COMPLETED */}
+          {isCompleted && (
+            <div className="text-center p-4 bg-green-50 rounded-lg">
+              <p className="text-green-700 font-medium">
+                ✅ Cycle {cycle.cycle_number} completed successfully!
+              </p>
+              <p className="text-sm text-gray-600 mt-2">
+                You can start a new cycle when ready.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Pending State - Info for regular members (non-admins, non-creators) */}
+      {isPending && !isAdmin && group.created_by !== currentUser.id && (
+        <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6 text-center">
+          <p className="text-yellow-800 font-medium">
+            ⏳ Waiting for admin to start bidding phase...
+          </p>
+          <p className="text-sm text-yellow-700 mt-2">
+            You'll be notified when bidding opens.
+          </p>
+        </div>
+      )}
+
+      {/* ✅ FIXED: Bidding Box - Show to members OR admins (even non-participating) */}
+      {showBidding && (isMember ? !hasMemberReceived : isCreator || isAdmin) && (
+        <BiddingBox 
+          cycle={cycle} 
+          group={group} 
+          currentUser={currentUser} 
+        />
+      )}
+
+      {/* Tab Navigation */}
+      {!isPending && (
+        <div className="flex gap-2 border-b border-gray-200">
+          <button
+            onClick={() => setActiveTab('activity')}
+            className={`px-4 py-3 font-medium transition-colors ${
+              activeTab === 'activity'
+                ? 'border-b-2 border-blue-600 text-blue-600'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            📋 Activity Feed
+          </button>
+
+          {showPayment && (
+            <button
+              onClick={() => setActiveTab('payment')}
+              className={`px-4 py-3 font-medium transition-colors ${
+                activeTab === 'payment'
+                  ? 'border-b-2 border-blue-600 text-blue-600'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              💰 Payments
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Content */}
+      {!isPending && (
+        <>
+          {/* ✅ FIXED: Activity Feed - Always show (no member check) */}
+          {activeTab === 'activity' && <ActivityFeed cycleId={cycle.id} />}
+
+          {/* Payment Tab */}
+          {activeTab === 'payment' && showPayment && (
+            <div className="space-y-4">
+              {/* ✅ NEW: Winner Payment Details Form - Only show to winner */}
+              {isReceiver && (
+                <WinnerPaymentDetailsForm cycle={cycle} groupId={group.id} />
+              )}
+
+              {/* ✅ NEW: Display Payment Details to Other Members */}
+              {!isReceiver && isMember && (
+
+               <PaymentDetailsDisplay cycle={cycle} group={group} />
+              )}
+
+              {/* ✅ FIXED: Payment Tracker - Only for actual members who are participants */}
+              {isMember && (
+
+                <PaymentTracker
+                  cycle={cycle}
+                  currentUser={currentUser}
+                  isReceiver={isReceiver}
+                  group={group}
+                />
+              )}
+
+              {/* Verification Panel for receiver */}
+              {isReceiver && !isOverdue && (
+                <VerificationPanel cycle={cycle} groupId={group.id} />
+              )}
+
+              {/* Admin Panel for overdue payments */}
+              {isAdmin && isOverdue && (
+                <AdminOverduePanel cycle={cycle} groupId={group.id} />
+              )}
+
+              {/* ✅ FIXED: Non-participating admin view - with verification panel */}
+              {!isMember && (isCreator || isAdmin) && (
+                <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-6">
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="text-2xl">🎯</span>
+                    <div>
+                      <p className="text-blue-900 font-semibold">
+                        Managing as Banker (Non-Participant)
+                      </p>
+                      <p className="text-sm text-blue-700 mt-1">
+                        You're managing this group without participating in payments.
+                      </p>
+                    </div>
+                  </div>
+
+                  
+                  {/* Allow admin to verify payments even if not participating */}
+                  {!isOverdue && (
+                    <div className="mt-4">
+                      <VerificationPanel cycle={cycle} groupId={group.id} />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+
+
+
+
+-e 
+
+##### FILE: src/components/dashboard/PaymentDetailsDisplay.tsx
+
+'use client'
+
+import { useState } from 'react'
+
+interface PaymentDetailsDisplayProps {
+  cycle: any
+  group: any
+}
+
+export default function PaymentDetailsDisplay({ cycle, group }: PaymentDetailsDisplayProps) {
+  const [copiedField, setCopiedField] = useState<string | null>(null)
+
+  const copyToClipboard = async (text: string, fieldName: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedField(fieldName)
+      setTimeout(() => setCopiedField(null), 2000)
+    } catch (err) {
+      console.error('Failed to copy:', err)
+    }
+  }
+
+  if (!cycle.payment_method_type || !cycle.payment_details) {
+    return (
+      <div className="bg-yellow-50 border-2 border-yellow-300 rounded-lg p-6">
+        <p className="text-yellow-800 font-medium">⏳ Waiting for winner to provide payment details...</p>
+      </div>
+    )
+  }
+
+  const renderCopyButton = (text: string, fieldName: string) => (
+    <button
+      onClick={() => copyToClipboard(text, fieldName)}
+      className="ml-2 px-3 py-1 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors flex items-center gap-1"
+    >
+      {copiedField === fieldName ? (
+        <>
+          <span>✓</span> Copied
+        </>
+      ) : (
+        <>
+          <span>📋</span> Copy
+        </>
+      )}
+    </button>
+  )
+
+  const details = cycle.payment_details
+
+  return (
+    <div className="bg-blue-50 border-2 border-blue-300 rounded-lg p-6">
+      <h4 className="text-lg font-bold text-blue-900 mb-4 flex items-center gap-2">
+        <span>💷</span> Payment Details - Send to Winner
+      </h4>
+      
+      <div className="space-y-3">
+        {/* UK Bank Transfer Details Only */}
+        <div className="bg-white rounded-lg p-4 border border-blue-200">
+          <p className="text-sm font-medium text-gray-600 mb-2">Account Holder Name</p>
+          <div className="flex items-center justify-between">
+            <p className="text-lg text-blue-900">{details.account_name}</p>
+            {renderCopyButton(details.account_name, 'accountname')}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg p-4 border border-blue-200">
+          <p className="text-sm font-medium text-gray-600 mb-2">Account Number</p>
+          <div className="flex items-center justify-between">
+            <p className="text-lg font-mono text-blue-900">{details.account_number}</p>
+            {renderCopyButton(details.account_number, 'account')}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg p-4 border border-blue-200">
+          <p className="text-sm font-medium text-gray-600 mb-2">Sort Code</p>
+          <div className="flex items-center justify-between">
+            <p className="text-lg font-mono text-blue-900">{details.ifsc}</p>
+            {renderCopyButton(details.ifsc, 'sortcode')}
+          </div>
+        </div>
+
+        {/* Instructions */}
+        {cycle.payment_instructions && (
+          <div className="bg-white rounded-lg p-4 border border-blue-200 mt-4">
+            <p className="text-sm font-medium text-gray-600 mb-1">📝 Instructions from Winner</p>
+            <p className="text-sm text-gray-800 whitespace-pre-wrap">{cycle.payment_instructions}</p>
+          </div>
+        )}
+
+        {/* Your Share Box */}
         <div className="bg-blue-100 rounded-lg p-3 mt-4">
           <p className="text-sm text-blue-800">
-            <strong>Amount to Send:</strong> ₹{cycle.winning_bid_amount?.toLocaleString('en-IN')}
+            <strong>Your Share:</strong> £{(cycle.winning_bid_amount / group.total_slots)?.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </p>
+          <p className="text-xs text-blue-600 mt-1">
+            (Total pot: £{cycle.winning_bid_amount?.toLocaleString('en-GB')} ÷ {group.total_slots} members)
           </p>
         </div>
       </div>
     </div>
   )
 }
-
 -e 
 
 ##### FILE: src/components/dashboard/MembersList.tsx
@@ -6484,6 +6848,10 @@ export default function VerificationPanel({
       fetchPayments()
     }
   }, [isOpen])
+
+  useEffect(() => {
+  fetchPayments()
+}, [cycle.id])
 
   const fetchPayments = async () => {
     // Fetch payments with basic member info
@@ -6724,44 +7092,67 @@ export default function ActivityFeed({ cycleId }: { cycleId: string }) {
 
   const formatTime = (timestamp: string) => {
     const date = new Date(timestamp)
-    return date.toLocaleTimeString('en-IN', { 
+    return date.toLocaleTimeString('en-GB', { 
       hour: '2-digit', 
       minute: '2-digit' 
     })
   }
 
-  const getActivityMessage = (activity: any) => {
-    const userName = activity.user?.full_name || 'Someone'
+const getActivityMessage = (activity: any) => {
+  const userName = activity.user?.full_name || 'Someone'
+  
+  switch (activity.activity_type) {
+    case 'cycle_started':
+      return { icon: '🎬', text: 'Cycle started', color: 'bg-blue-100 text-blue-800' }
     
-    switch (activity.activity_type) {
-      case 'cycle_started':
-        return { icon: '🎬', text: 'Cycle started', color: 'bg-blue-100 text-blue-800' }
-      case 'bidding_opened':
-        return { icon: '🎯', text: 'Bidding is now open', color: 'bg-yellow-100 text-yellow-800' }
-      case 'bid_placed':
-        return { 
-          icon: '⬇️', 
-          text: `${userName} bid ₹${activity.metadata?.bid_amount?.toLocaleString('en-IN')}`,
-          color: 'bg-purple-100 text-purple-800' 
-        }
-      case 'bidding_closed':
-        return { icon: '🔒', text: 'Bidding closed', color: 'bg-gray-100 text-gray-800' }
-      case 'winner_declared':
-        return { icon: '👑', text: `${userName} won the bid!`, color: 'bg-green-100 text-green-800' }
-      case 'payment_phase_started':
-        return { icon: '💰', text: 'Payment phase started', color: 'bg-blue-100 text-blue-800' }
-      case 'payment_made':
-        return { icon: '✓', text: `${userName} marked payment`, color: 'bg-green-100 text-green-800' }
-      case 'payment_verified':
-        return { icon: '🎉', text: `${userName}'s payment verified`, color: 'bg-teal-100 text-teal-800' }
-      case 'admin_verified_payment':
-        return { icon: '⭐', text: `Admin verified ${userName}'s payment`, color: 'bg-purple-100 text-purple-800' }
-      case 'cycle_completed':
-        return { icon: '🏁', text: 'Cycle completed', color: 'bg-gray-100 text-gray-800' }
-      default:
-        return { icon: '📌', text: activity.activity_type, color: 'bg-gray-100 text-gray-800' }
-    }
+    case 'bidding_opened':
+      return { icon: '🎯', text: 'Bidding is now open', color: 'bg-yellow-100 text-yellow-800' }
+    
+    case 'bid_placed':
+      return { 
+        icon: '⬇️', 
+        text: `${userName} bid £${activity.metadata?.bid_amount?.toLocaleString('en-GB')}`,
+        color: 'bg-purple-100 text-purple-800' 
+      }
+    
+    case 'bidding_closed':
+      return { icon: '🔒', text: 'Bidding closed', color: 'bg-gray-100 text-gray-800' }
+    
+    // ✅ CHANGED: "won the bid!" → "won this round!"
+    case 'winner_declared':
+      return { icon: '👑', text: `${userName} won this round!`, color: 'bg-green-100 text-green-800' }
+    
+    // ✅ NEW: Payment details published event
+    case 'payment_details_published':
+      return { icon: '📝', text: 'Payment details published', color: 'bg-blue-100 text-blue-800' }
+    
+    case 'payment_phase_started':
+      return { icon: '💰', text: 'Payment phase started', color: 'bg-blue-100 text-blue-800' }
+    
+    case 'payment_made':
+      return { icon: '✓', text: `${userName} marked payment`, color: 'bg-green-100 text-green-800' }
+    
+    // ✅ CHANGED: "userName's payment verified" → "Winner verified [member]'s payment"
+    case 'payment_verified':
+      const verifiedMemberName = activity.metadata?.verified_member_name || 'a member'
+      const winnerName = activity.user?.full_name || 'Winner'  // ✅ ADD THIS LINE
+      return { 
+        icon: '🎉', 
+        text: `${winnerName} verified ${verifiedMemberName}'s payment`,
+        color: 'bg-teal-100 text-teal-800' 
+      }
+    
+    case 'admin_verified_payment':
+      return { icon: '⭐', text: `Admin verified ${userName}'s payment`, color: 'bg-purple-100 text-purple-800' }
+    
+    case 'cycle_completed':
+      return { icon: '🏁', text: 'Cycle completed', color: 'bg-gray-100 text-gray-800' }
+    
+    default:
+      return { icon: '📌', text: activity.activity_type, color: 'bg-gray-100 text-gray-800' }
   }
+}
+
 
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200">
