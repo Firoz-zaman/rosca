@@ -99,7 +99,7 @@ export default function CycleManager({
                 Bidding Deadline
               </p>
               <p className="text-2xl font-bold text-yellow-900 mt-1">
-                11/03/2025 Monday, 5:00 PM local time
+                03/11/2025 (Monday), 5:00 PM local time
               </p>
             </div>
           </div>
@@ -115,7 +115,7 @@ export default function CycleManager({
                 Payment Deadline
               </p>
               <p className="text-2xl font-bold text-red-900 mt-1">
-                11/05/2025 (Tuesday) 11:59 PM local time
+                05/11/2025 (Wednesday) 5:00 PM local time
               </p>
               <p className="text-xs text-red-700 mt-2">
                 All payments must be verified before this date
