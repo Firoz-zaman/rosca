@@ -36,7 +36,7 @@ export default function CycleManager({
   isReceiver: boolean
   hasMemberReceived: boolean
 }) {
-  const [activeTab, setActiveTab] = useState('activity') // 'payment' | 'activity'
+  const [activeTab, setActiveTab] = useState('payment') // 'payment' | 'activity'
 
 
   // Status checks
