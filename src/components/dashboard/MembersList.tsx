@@ -60,12 +60,12 @@ export default function MembersList({
             {/* Payout Status Badge */}
             <div>
               {member.has_received ? (
-                <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                  ✓ Received
+                <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-200 text-green-800">
+                  🏆
                 </span>
               ) : (
                 <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-                  Pending
+                  Yet To Win
                 </span>
               )}
             </div>
