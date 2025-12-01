@@ -118,7 +118,7 @@ export default function CycleManager({
             <span className="text-4xl">⏰</span>
               <div className="flex-1">
                 <p className="text-xs text-yellow-700 uppercase tracking-wide mb-1">
-                  03 December 2025 (Wednesday), 5:00 PM local time
+                  03 December 2025 (Wednesday), 5:00 PM GMT
                 </p>
                 <p className="text-2xl font-bold text-yellow-900 mt-1">
                 {timeLeft}
@@ -135,7 +135,7 @@ export default function CycleManager({
 
               <div className="flex-1">
                 <p className="text-xs text-red-700 uppercase tracking-wide mb-1">
-                  06 December 2025 (Saturday), 5:00 PM local time
+                  06 December 2025 (Saturday), 5:00 PM GMT
                 </p>
                   <p className="text-2xl font-bold text-red-900 mt-1">
                     {timeLeft}
