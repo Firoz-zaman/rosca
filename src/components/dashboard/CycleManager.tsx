@@ -1,7 +1,6 @@
 'use client'
 
-
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import BiddingBox from './BiddingBox'
 import PaymentTracker from './PaymentTracker'
 import ActivityFeed from './ActivityFeed'
@@ -12,7 +11,6 @@ import EndBiddingButton from './EndBiddingButton'
 import EndPaymentButton from './EndpaymentButton'
 import WinnerPaymentDetailsForm from './WinnerPaymentDetailsForm'
 import PaymentDetailsDisplay from './PaymentDetailsDisplay'
-
 
 /**
  * CycleManager - Main container for current cycle
@@ -38,6 +36,35 @@ export default function CycleManager({
 }) {
   const [activeTab, setActiveTab] = useState('payment') // 'payment' | 'activity'
 
+  // Added countdown timer state
+  const [timeLeft, setTimeLeft] = useState('')
+
+  // Set deadline dynamically based on cycle status
+  const deadline = new Date(
+    cycle.status === 'bidding' ? '2025-12-03T17:00:00Z' : '2025-12-06T17:00:00Z'
+  ).getTime()
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = new Date().getTime()
+      const distance = deadline - now
+
+      if (distance < 0) {
+        clearInterval(interval)
+        setTimeLeft('Deadline passed')
+        return
+      }
+
+      const days = Math.floor(distance / (1000 * 60 * 60 * 24))
+      const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))
+      const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60))
+      const seconds = Math.floor((distance % (1000 * 60)) / 1000)
+
+      setTimeLeft(`${days}d ${hours}h ${minutes}m ${seconds}s`)
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [deadline])
 
   // Status checks
   const isPending = cycle.status === 'pending'
@@ -46,16 +73,13 @@ export default function CycleManager({
   const isOverdue = cycle.status === 'overdue'
   const isCompleted = cycle.status === 'completed'
 
-
   // ✅ Check if user is actually a member (not just creator)
   const isMember = hasMemberReceived !== undefined // If has_received exists, they're a member
   const isCreator = group.created_by === currentUser.id
 
-
   // UI visibility
   const showBidding = group.allocation_method === 'bidding' && isBidding
   const showPayment = isPayment || isOverdue
-
 
   return (
     <div className="space-y-4">
@@ -73,7 +97,6 @@ export default function CycleManager({
             </p>
           </div>
 
-
           <div className="text-right">
             <span className={`px-4 py-2 rounded-full text-sm font-semibold ${
               isPending ? 'bg-gray-400 text-gray-900' :
@@ -88,19 +111,18 @@ export default function CycleManager({
         </div>
       </div>
 
-
       {/* 🔥 DEADLINE BOX - Shows based on cycle phase 🔥 */}
       {isBidding && (
         <div className="bg-yellow-50 border-2 border-yellow-400 rounded-lg p-5 shadow-lg">
           <div className="flex items-center gap-3">
             <span className="text-4xl">⏰</span>
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-yellow-700 uppercase tracking-wide">
-                Bidding Deadline
-              </p>
-              <p className="text-2xl font-bold text-yellow-900 mt-1">
-                03 Nov 2025 (Monday), 5:00 PM local time
-              </p>
+              <div className="flex-1">
+                <p className="text-xs text-yellow-700 uppercase tracking-wide mb-1">
+                  03 December 2025 (Wednesday), 5:00 PM local time
+                </p>
+                <p className="text-2xl font-bold text-yellow-900 mt-1">
+                {timeLeft}
+                </p>
             </div>
           </div>
         </div>
@@ -110,20 +132,23 @@ export default function CycleManager({
         <div className="bg-red-50 border-2 border-red-400 rounded-lg p-5 shadow-lg">
           <div className="flex items-center gap-3">
             <span className="text-4xl">⚠️</span>
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-red-700 uppercase tracking-wide">
-                Payment Deadline
-              </p>
-              <p className="text-2xl font-bold text-red-900 mt-1">
-                05 Nov 2025 (Wednesday) 5:00 PM local time
-              </p>
+
+              <div className="flex-1">
+                <p className="text-xs text-red-700 uppercase tracking-wide mb-1">
+                  06 December 2025 (Saturday), 5:00 PM local time
+                </p>
+                  <p className="text-2xl font-bold text-red-900 mt-1">
+                    {timeLeft}
+                  </p>
               <p className="text-xs text-red-700 mt-2">
-                All payments must be verified before this date
+              All payments must be verified before this date
               </p>
             </div>
           </div>
         </div>
       )}
+
+
 
 
       {/* Admin Control Panel - Shows different button based on status */}

@@ -1,0 +1,3825 @@
+import './globals.css'  // ← This line is critical!
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  )
+}
+
+import { NextRequest, NextResponse } from 'next/server'
+import { validateEmail, validatePassword, validateName } from '../../../../lib/validation'
+
+// Rate limiting map (in production, use Redis)
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>()
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now()
+  const limit = rateLimitMap.get(ip)
+
+  if (!limit || now > limit.resetTime) {
+    rateLimitMap.set(ip, { count: 1, resetTime: now + 60000 }) // 1 minute
+    return true
+  }
+
+  if (limit.count >= 10) {
+    return false
+  }
+
+  limit.count++
+  return true
+}
+
+export async function POST(request: NextRequest) {
+  // Rate limiting
+  const ip = request.headers.get('x-forwarded-for') || 'unknown'
+  
+  if (!checkRateLimit(ip)) {
+    return NextResponse.json(
+      { error: 'Too many requests. Please try again later.' },
+      { status: 429 }
+    )
+  }
+
+  try {
+    const body = await request.json()
+    const { email, password, name, type } = body
+
+    // Validate based on type
+    if (type === 'signup') {
+      const emailValidation = validateEmail(email)
+      if (!emailValidation.isValid) {
+        return NextResponse.json(
+          { error: emailValidation.error },
+          { status: 400 }
+        )
+      }
+
+      const passwordValidation = validatePassword(password)
+      if (!passwordValidation.isValid) {
+        return NextResponse.json(
+          { error: passwordValidation.error },
+          { status: 400 }
+        )
+      }
+
+      const nameValidation = validateName(name)
+      if (!nameValidation.isValid) {
+        return NextResponse.json(
+          { error: nameValidation.error },
+          { status: 400 }
+        )
+      }
+    }
+
+    if (type === 'signin') {
+      const emailValidation = validateEmail(email)
+      if (!emailValidation.isValid) {
+        return NextResponse.json(
+          { error: 'Invalid credentials' }, // Generic error
+          { status: 400 }
+        )
+      }
+    }
+
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    return NextResponse.json(
+      { error: 'Validation failed' },
+      { status: 400 }
+    )
+  }
+}
+import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import Header from '@/components/dashboard/Header'
+
+export default async function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  const supabase = await createClient()
+  const { data: { user }, error } = await supabase.auth.getUser()
+
+  if (error || !user) {
+    redirect('/auth/signin')
+  }
+
+  // 👇 ADD THIS: Fetch user role
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <Header user={user} isAdmin={isAdmin} />
+      <main className="pb-20">
+        {children}
+      </main>
+    </div>
+  )
+}
+
+import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import Link from 'next/link'
+
+export default async function DashboardPage() {
+  const supabase = await createClient()
+  const { data: { user }, error } = await supabase.auth.getUser()
+
+  if (error || !user) {
+    redirect('/auth/signin')
+  }
+
+  // Fetch user profile with role
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+
+  // ✅ FIXED: Fetch groups where user is a MEMBER
+  const { data: memberGroups, error: memberError } = await supabase
+    .from('rosca_members')
+    .select(`
+      rosca_id,
+      has_received,
+      roscas (
+        id,
+        name,
+        contribution_amount,
+        frequency,
+        start_date,
+        status,
+        total_slots,
+        allocation_method,
+        created_by
+      )
+    `)
+    .eq('user_id', user.id)
+
+  console.log('📦 Raw memberGroups:', memberGroups)
+
+  // Filter out null roscas before mapping
+  const memberGroupsList = memberGroups
+    ?.filter((g: any) => g.roscas !== null)
+    ?.map((g: any) => ({
+      ...g.roscas,
+      has_received: g.has_received,
+      is_member: true
+    })) || []
+
+  // ✅ NEW: Also fetch groups where user is CREATOR but NOT a member
+  const memberGroupIds = memberGroupsList.map((g: any) => g.id)
+  
+  const { data: createdGroups } = await supabase
+    .from('roscas')
+    .select('*')
+    .eq('created_by', user.id)
+    .not('id', 'in', memberGroupIds.length > 0 ? `(${memberGroupIds.join(',')})` : '()')
+
+  console.log('👤 Created (non-member) groups:', createdGroups)
+
+  // Combine both lists
+  const userGroups = [
+    ...memberGroupsList,
+    ...(createdGroups?.map((g: any) => ({
+      ...g,
+      has_received: false, // Creator not participating = never receives
+      is_member: false
+    })) || [])
+  ]
+
+  console.log('✅ All userGroups:', userGroups)
+
+  // Fetch active cycles for user's groups
+  const groupIds = userGroups.map((g: any) => g.id)
+  
+  const { data: activeCycles } = groupIds.length > 0 ? await supabase
+    .from('payment_cycles')
+    .select('*')
+    .in('rosca_id', groupIds)
+    .in('status', ['bidding', 'payment', 'overdue'])
+    : { data: [] }
+
+  // Fetch user's payment statuses for active cycles (only for member groups)
+  const memberGroupIdsList = memberGroupsList.map((g: any) => g.id)
+  const cycleIds = activeCycles
+    ?.filter((c: any) => memberGroupIdsList.includes(c.rosca_id))
+    .map((c: any) => c.id) || []
+  
+  const { data: userPayments } = cycleIds.length > 0 ? await supabase
+    .from('cycle_payments')
+    .select(`
+      cycle_id,
+      has_paid,
+      verified_by_receiver,
+      member:rosca_members!inner(user_id)
+    `)
+    .in('cycle_id', cycleIds)
+    .eq('member.user_id', user.id)
+    : { data: [] }
+
+  // Create a map of cycle info by rosca_id
+  const cyclesByRosca = new Map()
+  activeCycles?.forEach((cycle: any) => {
+    const payment = userPayments?.find((p: any) => p.cycle_id === cycle.id)
+    cyclesByRosca.set(cycle.rosca_id, {
+      ...cycle,
+      userPayment: payment
+    })
+  })
+
+  // Get pending action for each group
+  const getGroupAction = (group: any) => {
+    // ✅ NEW: Non-member creators have no actions, just manage
+    if (!group.is_member) {
+      return {
+        type: 'manage',
+        text: 'Manage group',
+        color: 'bg-blue-100 text-blue-700 border-blue-300',
+        urgent: false
+      }
+    }
+
+    const cycle = cyclesByRosca.get(group.id)
+    if (!cycle) return null
+
+    const isReceiver = cycle.winner_id === user.id
+    const payment = cycle.userPayment
+
+    // Priority 1: Bidding (if member hasn't received yet)
+    if (cycle.status === 'bidding' && !group.has_received && group.allocation_method === 'bidding') {
+      return {
+        type: 'bid',
+        text: 'Place your bid',
+        color: 'bg-purple-100 text-purple-700 border-purple-300',
+        urgent: true
+      }
+    }
+
+    // Priority 2: Payment needed
+    if ((cycle.status === 'payment' || cycle.status === 'overdue') && !isReceiver && !payment?.has_paid) {
+      return {
+        type: 'pay',
+        text: 'Payment pending',
+        color: 'bg-red-100 text-red-700 border-red-300',
+        urgent: true
+      }
+    }
+
+    // Priority 3: Receiver needs to verify
+    if (cycle.status === 'payment' && isReceiver) {
+      return {
+        type: 'verify',
+        text: 'Verify payments',
+        color: 'bg-blue-100 text-blue-700 border-blue-300',
+        urgent: false
+      }
+    }
+
+    // Payment made, waiting for verification
+    if (payment?.has_paid && !payment?.verified_by_receiver) {
+      return {
+        type: 'waiting',
+        text: 'Awaiting verification',
+        color: 'bg-yellow-100 text-yellow-700 border-yellow-300',
+        urgent: false
+      }
+    }
+
+    // All good
+    if (payment?.verified_by_receiver) {
+      return {
+        type: 'verified',
+        text: 'Payment verified',
+        color: 'bg-green-100 text-green-700 border-green-300',
+        urgent: false
+      }
+    }
+
+    return null
+  }
+
+  // Calculate stats
+  const totalGroups = userGroups.length
+  const activeGroups = userGroups.filter((g: any) => g.status === 'active').length
+  const pendingActions = userGroups.filter((g: any) => {
+    const action = getGroupAction(g)
+    return action?.urgent
+  }).length
+
+  return (
+    <div className="px-4 py-6 max-w-6xl mx-auto">
+      {/* Welcome Section */}
+      <div className="mb-6">
+        <h2 className="text-2xl font-bold text-slate-900 mb-1">
+          Welcome back, {user.user_metadata?.full_name?.split(' ')[0] || 'User'}! 👋
+        </h2>
+        <p className="text-slate-600">
+          Manage your ROSCA groups
+          {isAdmin && (
+            <span className="ml-2 px-2 py-1 bg-purple-100 text-purple-700 text-xs font-semibold rounded-full">
+              Admin
+            </span>
+          )}
+        </p>
+      </div>
+
+      {/* Quick Stats */}
+      {totalGroups > 0 && (
+        <div className="grid grid-cols-3 gap-3 mb-6">
+          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-4 text-white">
+            <p className="text-2xl font-bold">{totalGroups}</p>
+            <p className="text-xs text-blue-100 mt-1">Total Groups</p>
+          </div>
+          <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl p-4 text-white">
+            <p className="text-2xl font-bold">{activeGroups}</p>
+            <p className="text-xs text-green-100 mt-1">Active</p>
+          </div>
+          <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl p-4 text-white">
+            <p className="text-2xl font-bold">{pendingActions}</p>
+            <p className="text-xs text-red-100 mt-1">Action Needed</p>
+          </div>
+        </div>
+      )}
+
+      {/* Create Group Button - Only show to admins */}
+      {isAdmin && (
+        <Link href="/dashboard/groups/create">
+          <button className="w-full mb-6 flex items-center justify-center gap-2 px-6 py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-[1.02]">
+            <svg className="w-6 h-6" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+              <path d="M12 4v16m8-8H4"></path>
+            </svg>
+            <span>Create New Group</span>
+          </button>
+        </Link>
+      )}
+
+      {/* Groups List */}
+      <div className="space-y-4">
+        <h3 className="text-lg font-semibold text-slate-900 mb-3">
+          My Groups ({userGroups.length})
+        </h3>
+
+        {userGroups.length === 0 ? (
+          <div className="bg-white rounded-xl p-8 text-center shadow-sm border border-slate-200">
+            <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-slate-400" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+                <path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+              </svg>
+            </div>
+            <p className="text-slate-600 font-medium mb-2">No groups yet</p>
+            <p className="text-slate-500 text-sm">
+              {isAdmin 
+                ? 'Create your first chitfund group to get started' 
+                : 'Wait for an admin to add you to a group'}
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {userGroups.map((group: any) => {
+              const action = getGroupAction(group)
+              const cycle = cyclesByRosca.get(group.id)
+
+              return (
+                <Link 
+                  key={group.id} 
+                  href={`/dashboard/groups/${group.id}`}
+                  className={`block bg-white rounded-xl p-5 shadow-sm border transition-all hover:shadow-md ${
+                    action?.urgent 
+                      ? 'border-red-300 hover:border-red-400' 
+                      : 'border-slate-200 hover:border-blue-300'
+                  }`}
+                >
+                  {/* Header */}
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        <h4 className="text-lg font-bold text-slate-900">
+                          {group.name}
+                        </h4>
+                        <span className={`px-2 py-0.5 text-xs font-semibold rounded capitalize ${
+                          group.status === 'active' 
+                            ? 'bg-green-100 text-green-700'
+                            : group.status === 'pending'
+                            ? 'bg-yellow-100 text-yellow-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {group.status === 'pending' ? 'In Progress' : group.status}
+                        </span>
+                        {/* ✅ NEW: Show banker badge for non-participating creators */}
+                        {!group.is_member && group.created_by === user.id && (
+                          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-blue-100 text-blue-700">
+                            👤 Banker
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Action Badge */}
+                      {action && (
+                        <div className={`inline-flex items-center gap-1 px-3 py-1 rounded-lg border text-xs font-semibold ${action.color}`}>
+                          {action.text}
+                          {action.urgent && (
+                            <span className="animate-pulse">●</span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Cycle Info */}
+                      {cycle && (
+                        <p className="text-xs text-slate-500 mt-2">
+                          Cycle {cycle.cycle_number} • {cycle.status === 'bidding' ? '🎯 Bidding' : cycle.status === 'payment' ? '💰 Payment' : '⚠️ Overdue'}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Group Icon */}
+                    <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center flex-shrink-0">
+                      <svg className="w-6 h-6 text-white" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+                        <path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* Details */}
+                  <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+                    <div>
+                      <p className="text-xs text-slate-500 mb-1">Contribution</p>
+                      <p className="text-lg font-bold text-slate-900">
+                        £{Number(group.contribution_amount).toLocaleString('en-GB')}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-slate-500 mb-1">Frequency</p>
+                      <p className="text-sm font-semibold text-blue-600 capitalize">
+                        {group.frequency}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-slate-500 mb-1">Members</p>
+                      <p className="text-sm font-semibold text-slate-900">
+                        {group.total_slots}
+                      </p>
+                    </div>
+                  </div>
+                </Link>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+
+
+
+
+
+'use client'
+
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
+
+interface CreateGroupFormProps {
+  createGroup: (formData: FormData) => Promise<{ error?: string }>
+}
+
+export default function CreateGroupForm({ createGroup }: CreateGroupFormProps) {
+  const router = useRouter()
+  const [loading, setLoading] = useState(false)
+
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    setLoading(true)
+
+    const formData = new FormData(e.currentTarget)
+    const result = await createGroup(formData)
+
+    if (result?.error) {
+      alert(result.error)
+      setLoading(false)
+    }
+    // If successful, the server action will redirect
+  }
+
+  return (
+    <div className="px-4 py-6">
+      {/* Header */}
+      <div className="mb-6">
+        <button
+          onClick={() => router.back()}
+          className="flex items-center gap-2 text-slate-600 hover:text-slate-900 mb-4"
+        >
+          <svg className="w-5 h-5" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+            <path d="M15 19l-7-7 7-7"></path>
+          </svg>
+          <span>Back</span>
+        </button>
+
+        <h2 className="text-2xl font-bold text-slate-900 mb-1">
+          Create New Group
+        </h2>
+        <p className="text-slate-600">Set up your chitfund group</p>
+      </div>
+
+      {/* Form */}
+      <form onSubmit={handleSubmit} className="space-y-5">
+        
+        {/* Group Name */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+          <label className="block text-sm font-semibold text-slate-700 mb-2">
+            Group Name
+          </label>
+          <input
+            type="text"
+            name="name"
+            required
+            placeholder="e.g., Family Fund"
+            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+          />
+        </div>
+
+        {/* Description */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+          <label className="block text-sm font-semibold text-slate-700 mb-2">
+            Description
+          </label>
+          <textarea
+            name="description"
+            placeholder="Brief description of the group"
+            rows={3}
+            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition resize-none"
+          />
+        </div>
+
+        {/* Contribution Amount */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+          <label className="block text-sm font-semibold text-slate-700 mb-2">
+            Contribution Amount
+          </label>
+          <input
+            type="number"
+            name="amount"
+            required
+            placeholder="5000"
+            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+          />
+        </div>
+
+        {/* Frequency */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+          <label className="block text-sm font-semibold text-slate-700 mb-2">
+            Frequency
+          </label>
+          <select
+            name="frequency"
+            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition bg-white"
+          >
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </div>
+
+        {/* Total Members */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+          <label className="block text-sm font-semibold text-slate-700 mb-2">
+            Total Members
+          </label>
+          <input
+            type="number"
+            name="totalSlots"
+            required
+            min="2"
+            placeholder="12"
+            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+          />
+        </div>
+
+        {/* Allocation Method */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+          <label className="block text-sm font-semibold text-slate-700 mb-2">
+            Allocation Method
+          </label>
+          <select
+            name="allocationMethod"
+            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition bg-white"
+          >
+            <option value="random">Random Draw</option>
+            <option value="bidding">Bidding</option>
+            <option value="banker">Banker Managed</option>
+          </select>
+        </div>
+
+        {/* ✅ NEW: Creator Participation Toggle */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+          <label className="flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              name="creatorParticipates"
+              defaultChecked={true}
+              className="w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+            />
+            <div className="ml-3">
+              <span className="block text-sm font-semibold text-slate-700">
+                I want to participate as a member
+              </span>
+              <span className="block text-xs text-slate-500 mt-1">
+                Unchecked: You'll only manage the group without contributing or receiving the pot
+              </span>
+            </div>
+          </label>
+        </div>
+
+        {/* Submit Button */}
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-blue-400 disabled:to-purple-400 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-1.02 disabled:transform-none disabled:cursor-not-allowed"
+        >
+          {loading ? (
+            <span className="flex items-center justify-center gap-2">
+              <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Creating Group...
+            </span>
+          ) : (
+            'Create Group'
+          )}
+        </button>
+      </form>
+    </div>
+  )
+}
+
+import { createGroup } from './actions'
+import { redirect } from 'next/navigation'
+import { createClient } from '@/lib/supabase/server'
+import CreateGroupForm from './CreateGroupForm'
+
+export default async function CreateGroupPage() {
+  const supabase = await createClient()
+  const { data: { user }, error } = await supabase.auth.getUser()
+
+  if (error || !user) {
+    redirect('/auth/signin')
+  }
+
+  // Check if user is admin
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (profile?.role !== 'admin') {
+    redirect('/dashboard') // Redirect non-admins to dashboard
+  }
+
+  return (
+    <CreateGroupForm createGroup={createGroup} />
+  )
+}
+
+
+'use server'
+
+import { createClient } from '@/lib/supabase/server'
+import { revalidatePath } from 'next/cache'
+import { redirect } from 'next/navigation'
+
+export async function createGroup(formData: FormData) {
+  const supabase = await createClient()
+  
+  // Get current user
+  const { data: { user }, error: userError } = await supabase.auth.getUser()
+  if (userError || !user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Extract form data
+  const name = formData.get('name') as string
+  const description = formData.get('description') as string
+  const amount = formData.get('amount') as string
+  const frequency = formData.get('frequency') as string
+  const totalSlots = formData.get('totalSlots') as string
+  const allocationMethod = formData.get('allocationMethod') as string
+  
+  // Get checkbox value ('on' = checked, null = unchecked)
+  const creatorParticipates = formData.get('creatorParticipates') === 'on'
+
+  // Insert group with creator_participates flag
+  const { data: newGroup, error: insertError } = await supabase
+    .from('roscas')
+    .insert({
+      name,
+      description,
+      contribution_amount: parseFloat(amount),
+      frequency,
+      total_slots: parseInt(totalSlots),
+      allocation_method: allocationMethod,
+      created_by: user.id,
+      status: 'pending',
+      creator_participates: creatorParticipates
+    })
+    .select()
+    .single()
+
+  if (insertError) {
+    return { error: insertError.message }
+  }
+
+  // Only add creator as member if they want to participate
+  if (creatorParticipates) {
+    const { error: memberError } = await supabase
+      .from('rosca_members')
+      .insert({
+        rosca_id: newGroup.id,
+        user_id: user.id,
+        slot_number: 1,
+        has_received: false
+      })
+
+    if (memberError) {
+      return { error: memberError.message }
+    }
+  }
+
+  // Revalidate dashboard to show new group
+  revalidatePath('/dashboard')
+  
+  // Redirect to dashboard
+  redirect('/dashboard')
+}
+
+
+import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import GroupDetails from '@/components/dashboard/GroupDetails'
+import MembersList from '@/components/dashboard/MembersList'
+import AddMemberButton from '@/components/dashboard/AddMemberButton'
+import StartCycleButton from '@/components/dashboard/StartCycleButton'
+import CycleManager from '@/components/dashboard/CycleManager'
+import ResetRoscaButton from '@/components/dashboard/ResetRoscaButton'
+
+/**
+ * Group Detail Page - Displays full information about a ROSCA group
+ * Dynamic route: /dashboard/groups/[id]
+ */
+export default async function GroupPage({ 
+  params 
+}: { 
+  params: Promise<{ id: string }> 
+}) {
+  const { id } = await params
+  const supabase = await createClient()
+  
+  // Authenticate user
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  
+  if (authError || !user) {
+    redirect('/login')
+  }
+
+  // Fetch group details
+  const { data: group, error: groupError } = await supabase
+    .from('roscas')
+    .select(`
+      id,
+      name,
+      description,
+      contribution_amount,
+      frequency,
+      total_slots,
+      status,
+      allocation_method,
+      start_date,
+      created_by,
+      created_at,
+      creator_participates
+    `)
+    .eq('id', id)
+    .single()
+
+  if (groupError || !group) {
+    redirect('/dashboard')
+  }
+
+  // Fetch all members
+  // Fetch members without nested profile join
+  const { data: membersData, error: membersError } = await supabase
+    .from('rosca_members')
+    .select(`
+      id,
+      slot_number,
+      has_received,
+      joined_at,
+      user_id
+    `)
+    .eq('rosca_id', id)
+    .order('slot_number', { ascending: true })
+
+  // Fetch all profiles separately in one query
+  const memberIds = membersData?.map(m => m.user_id) || []
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, full_name, username, phone, email')
+    .in('id', memberIds)
+
+  // Combine members with their profiles
+  const members = membersData?.map(member => {
+    const profile = profiles?.find(p => p.id === member.user_id)
+    return {
+      ...member,
+      profiles: profile || null
+    }
+  }) || []
+
+  // Check permissions
+  const isCreator = user.id === group.created_by
+  
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+  
+  const isAdmin = profile?.role === 'admin'
+
+  // Get current user's member record
+  const currentMember = members?.find(m => m.user_id === user.id)
+const hasMemberReceived = currentMember ? currentMember.has_received : undefined
+
+
+
+// Fetch active cycle
+const { data: activeCycle } = await supabase
+  .from('payment_cycles')
+  .select(`
+    *,
+    winner:winner_id(id, email, full_name)
+  `)
+  .eq('rosca_id', id)
+  .in('status', ['pending','bidding', 'payment', 'overdue'])
+  .order('cycle_number', { ascending: false })
+  .limit(1)
+  .single()
+
+
+  const isReceiver = activeCycle?.winner_id === user.id
+
+  // Calculate available slots
+  const availableSlots = group.total_slots - (members?.length || 0)
+
+  return (
+    <div className="min-h-screen bg-gray-50 pb-20">
+      <div className="px-4 py-6 max-w-4xl mx-auto space-y-6">
+        
+        {/* Group Information Card */}
+        <GroupDetails 
+          group={group} 
+          availableSlots={availableSlots}
+        />
+
+        {/* Creator Participation Status Badge */}
+        {isCreator && (
+          <div className={`rounded-lg p-4 ${
+            group.creator_participates 
+              ? 'bg-green-50 border-2 border-green-300' 
+              : 'bg-blue-50 border-2 border-blue-300'
+          }`}>
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">
+                {group.creator_participates ? '👤' : '🎯'}
+              </span>
+              <div>
+                <p className="font-semibold text-gray-900">
+                  {group.creator_participates 
+                    ? 'You are participating as a member' 
+                    : 'You are managing as banker (non-participant)'}
+                </p>
+                <p className="text-sm text-gray-600 mt-1">
+                  {group.creator_participates
+                    ? 'You will contribute and receive pot like other members'
+                    : 'You manage the group without contributing'}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Active Cycle Manager OR Start Cycle Button */}
+        {activeCycle ? (
+          <CycleManager
+            cycle={activeCycle}
+            group={group}
+            currentUser={user}
+            isAdmin={isAdmin}
+            isReceiver={isReceiver}
+            hasMemberReceived={hasMemberReceived}
+          />
+        ) : isCreator ? (
+          <div className="bg-yellow-50 border-2 border-yellow-300 rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-yellow-900 mb-2">
+              No Active Cycle
+            </h3>
+            <p className="text-sm text-yellow-800 mb-4">
+              Start the first cycle to begin bidding and payments
+            </p>
+            <StartCycleButton groupId={group.id} />
+          </div>
+        ) : (
+          <div className="bg-blue-50 border-2 border-blue-300 rounded-lg p-6 text-center">
+            <p className="text-blue-800">
+              Waiting for group creator to start the first cycle...
+            </p>
+          </div>
+        )}
+
+        {/* 🔄 Reset ROSCA Option - Only shows when ALL members have received */}
+        {isCreator && !activeCycle && members && members.length > 0 && (
+          (() => {
+            // ✅ Check if ALL members have received payouts
+            const allMembersReceived = members.every(m => m.has_received)
+            const receivedCount = members.filter(m => m.has_received).length
+            
+            return allMembersReceived ? (
+              <div className="bg-gradient-to-r from-orange-50 to-red-50 border-2 border-orange-300 rounded-lg p-6">
+                <div className="flex items-start gap-4">
+                  <span className="text-4xl">🎉</span>
+                  <div className="flex-1">
+                    <h3 className="text-xl font-bold text-orange-900 mb-2">
+                      ROSCA Cycle Complete!
+                    </h3>
+                    <p className="text-sm text-orange-800 mb-1">
+                      ✅ All {members.length} members have received their payouts
+                    </p>
+                    <p className="text-sm text-orange-700 mb-4">
+                      You can now reset the ROSCA to start a new round where everyone participates again.
+                    </p>
+                    <ResetRoscaButton 
+                      groupId={group.id} 
+                      totalMembers={members.length} 
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              // Optional: Show progress indicator when not all members have received
+              <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
+                <p className="text-sm text-blue-800">
+                  📊 Progress: {receivedCount}/{members.length} members have received payouts
+                </p>
+              </div>
+            )
+          })()
+        )}
+
+        {/* Members Section */}
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold text-gray-900">
+              Members ({members?.length || 0}/{group.total_slots})
+            </h2>
+            
+            {/* Only show Add Member button to group creator */}
+            {isCreator && availableSlots > 0 && (
+              <AddMemberButton groupId={group.id} />
+            )}
+          </div>
+
+          {/* Members List */}
+          <MembersList 
+            members={members || []} 
+            isCreator={isCreator}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+'use server'
+
+import { createClient } from '@/lib/supabase/server'
+import { revalidatePath } from 'next/cache'
+
+/**
+ * Add Member to Group
+ * Updated to search by email instead of username
+ */
+export async function addMemberToGroup(groupId: string, memberEmail: string) {
+  const supabase = await createClient()
+  
+  // 1. Authenticate
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  
+  if (authError || !user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // 2. Verify group and permissions
+  const { data: group, error: groupError } = await supabase
+    .from('roscas')
+    .select('id, created_by, total_slots')
+    .eq('id', groupId)
+    .single()
+
+  if (groupError || !group) {
+    return { error: 'Group not found' }
+  }
+
+  if (group.created_by !== user.id) {
+    return { error: 'Only group creator can add members' }
+  }
+
+  // 3. Find user by email
+  const { data: memberProfile, error: profileError } = await supabase
+    .from('profiles')
+    .select('id, email, full_name')
+    .eq('email', memberEmail.toLowerCase().trim())
+    .single()
+
+  if (profileError || !memberProfile) {
+    return { 
+      error: 'User not found. They must sign up first at your app with this email: ' + memberEmail 
+    }
+  }
+
+  // 4. Check if already a member
+  const { data: existingMember } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .eq('user_id', memberProfile.id)
+    .single()
+
+  if (existingMember) {
+    return { error: `${memberProfile.full_name} is already a member of this group` }
+  }
+
+  // 5. Check available slots
+  const { count: currentMembers } = await supabase
+    .from('rosca_members')
+    .select('id', { count: 'exact', head: true })
+    .eq('rosca_id', groupId)
+
+  if (currentMembers !== null && currentMembers >= group.total_slots) {
+    return { error: 'Group is full' }
+  }
+
+  // 6. Add member
+  const nextSlot = (currentMembers || 0) + 1
+
+  const { error: insertError } = await supabase
+    .from('rosca_members')
+    .insert({
+      rosca_id: groupId,
+      user_id: memberProfile.id,
+      slot_number: nextSlot,
+      has_received: false
+    })
+
+  if (insertError) {
+    console.error('Insert error:', insertError)
+    return { error: 'Failed to add member: ' + insertError.message }
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { 
+    success: true, 
+    memberName: memberProfile.full_name,
+    memberEmail: memberProfile.email
+  }
+}
+
+/**
+ * Start a new cycle (creates cycle in 'pending' status)
+ * ✅ FIXED: Validates minimum 2 members before starting
+ * ✅ FIXED: Blocks starting when all members have won
+ */
+export async function startNewCycle(groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('*')
+    .eq('id', groupId)
+    .single()
+
+  if (!group) {
+    return { error: 'Group not found' }
+  }
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only group creator or admin can start cycles' }
+  }
+
+  // ✅ NEW: Validate minimum members
+  const { count: memberCount } = await supabase
+    .from('rosca_members')
+    .select('id', { count: 'exact', head: true })
+    .eq('rosca_id', groupId)
+
+  if (!memberCount || memberCount < 2) {
+    return { error: 'Need at least 2 members to start a cycle. Add more members first.' }
+  }
+
+  // ✅ NEW: Check if ALL members have already received (ROSCA complete)
+  const { data: allMembers } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+
+  const allHaveReceived = allMembers?.every(m => m.has_received === true)
+
+  if (allHaveReceived) {
+    return { error: 'All members have received payouts. Please reset the ROSCA to start a new round.' }
+  }
+
+  // Check if there's already an active cycle
+  const { data: activeCycle } = await supabase
+    .from('payment_cycles')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .in('status', ['pending', 'bidding', 'payment', 'overdue'])
+    .single()
+
+  if (activeCycle) {
+    return { error: 'There is already an active cycle. Complete it first.' }
+  }
+
+  const { count: cycleCount } = await supabase
+    .from('payment_cycles')
+    .select('id', { count: 'exact', head: true })
+    .eq('rosca_id', groupId)
+
+  const nextCycleNumber = (cycleCount || 0) + 1
+  
+  // ✅ FIXED: Use actual member count, not total_slots
+  const totalAmount = group.contribution_amount * (memberCount || 0)
+
+  // Create cycle in 'pending' status
+  const { data: cycle, error: cycleError } = await supabase
+    .from('payment_cycles')
+    .insert({
+      rosca_id: groupId,
+      cycle_number: nextCycleNumber,
+      status: 'pending',
+      bidding_start_date: null,
+      bidding_end_date: null,
+      payment_deadline_date: null,
+      cycle_end_date: null,
+      winning_bid_amount: totalAmount
+    })
+    .select()
+    .single()
+
+  if (cycleError) {
+    return { error: 'Failed to create cycle: ' + cycleError.message }
+  }
+
+  // Create payment records for all members
+  const { data: members } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+
+  if (members && members.length > 0) {
+    await supabase
+      .from('cycle_payments')
+      .insert(
+        members.map((member) => ({
+          cycle_id: cycle.id,
+          member_id: member.id,
+          has_paid: false,
+          verified_by_receiver: false,
+          verified_by_admin: false
+        }))
+      )
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycle.id,
+      activity_type: 'cycle_created',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true, cycleNumber: nextCycleNumber }
+}
+
+/**
+ * Start Bidding Phase
+ */
+/**
+ * Start Bidding Phase
+ * ✅ FIXED: Auto-selects if only 1 eligible member (skips bidding entirely)
+ */
+export async function startBiddingPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can start bidding' }
+  }
+
+  // ✅ NEW: Check eligible members count BEFORE starting bidding
+  const { data: eligibleMembers } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .eq('has_received', false)
+
+  if (!eligibleMembers || eligibleMembers.length === 0) {
+    return { error: 'No eligible members remaining' }
+  }
+
+  // ✅ NEW: If only 1 eligible member, skip bidding and auto-select immediately
+  if (eligibleMembers.length === 1) {
+    console.log('⚡ Only 1 eligible member - skipping bidding phase, auto-selecting winner...')
+    // Call endBiddingPhase which handles auto-selection
+    return endBiddingPhase(cycleId, groupId)
+  }
+
+  // Normal flow: Multiple eligible members - start bidding
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'bidding',
+      bidding_start_date: new Date().toISOString()
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to start bidding: ' + updateError.message }
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'bidding_opened',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+
+/**
+ * End Bidding Phase and Select Winner
+ * ✅ FIXED: Auto-selects last eligible member if only 1 remains (final round)
+ * ✅ FIXED: Sets has_received flag for winner
+ * ✅ FIXED: Uses actual member count for pot calculation
+ */
+/**
+ * End Bidding Phase and Select Winner
+ * ✅ FIXED: Auto-selects last eligible member if only 1 remains (final round)
+ * ✅ FIXED: Sets has_received flag for winner CORRECTLY
+ * ✅ FIXED: Uses member.id instead of user_id for updates
+ */
+export async function endBiddingPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by, allocation_method, contribution_amount, total_slots')
+    .eq('id', groupId)
+    .single()
+
+  if (!group) {
+    return { error: 'Group not found' }
+  }
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can end bidding' }
+  }
+
+  // Get actual member count for pot calculation
+  const { count: memberCount } = await supabase
+    .from('rosca_members')
+    .select('id', { count: 'exact', head: true })
+    .eq('rosca_id', groupId)
+
+  // ✅ Check eligible members count (members who haven't received yet)
+  const { data: eligibleMembers } = await supabase
+    .from('rosca_members')
+    .select('id, user_id, slot_number')
+    .eq('rosca_id', groupId)
+    .eq('has_received', false)
+
+  if (!eligibleMembers || eligibleMembers.length === 0) {
+    return { error: 'No eligible members remaining for payout' }
+  }
+
+  // ✅ If only 1 eligible member left, auto-select them (FINAL ROUND)
+// ✅ If only 1 eligible member left, auto-select them (FINAL ROUND)
+if (eligibleMembers.length === 1) {
+  const finalWinner = eligibleMembers[0]
+  const totalAmount = group.contribution_amount * (memberCount || 0)
+
+  console.log('🎯 AUTO-SELECT - Final Winner:', {
+    memberId: finalWinner.id,
+    userId: finalWinner.user_id,
+    slotNumber: finalWinner.slot_number
+  })
+
+  // Update cycle with auto-selected winner
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'payment',
+      bidding_end_date: new Date().toISOString(),
+      winner_id: finalWinner.user_id,
+      winning_bid_amount: totalAmount,
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: `Failed to select final winner: ${updateError.message}` }
+  }
+
+  // ✅ FIXED: Mark winner as having received (using member ID)
+  console.log('🏆 Attempting to mark winner as has_received...')
+  console.log('🏆 Update query: member_id =', finalWinner.id)
+  
+  const { error: memberError, data: updatedMember } = await supabase
+    .from('rosca_members')
+    .update({ has_received: true })
+    .eq('id', finalWinner.id)
+    .select()
+
+  console.log('🏆 Update result:', {
+    error: memberError,
+    updatedMember,
+    rowsAffected: updatedMember?.length || 0
+  })
+
+  if (memberError) {
+    console.error('❌ Error marking winner:', memberError)
+  } else if (!updatedMember || updatedMember.length === 0) {
+    console.error('❌ NO ROWS UPDATED - member ID might be wrong!')
+  } else {
+    console.log('✅ Winner marked successfully:', updatedMember[0])
+  }
+
+  // Auto-verify winner's own payment
+  const { data: winnerPayment } = await supabase
+    .from('cycle_payments')
+    .select('id')
+    .eq('cycle_id', cycleId)
+    .eq('member_id', finalWinner.id)
+    .single()
+
+  if (winnerPayment) {
+    await supabase
+      .from('cycle_payments')
+      .update({
+        has_paid: true,
+        paid_at: new Date().toISOString(),
+        verified_by_receiver: true,
+        receiver_verified_at: new Date().toISOString(),
+      })
+      .eq('id', winnerPayment.id)
+  }
+
+  // Create payment records if they don't exist
+  const { data: existingPayments } = await supabase
+    .from('cycle_payments')
+    .select('id')
+    .eq('cycle_id', cycleId)
+
+  if (!existingPayments || existingPayments.length === 0) {
+    const { data: members } = await supabase
+      .from('rosca_members')
+      .select('id')
+      .eq('rosca_id', groupId)
+
+    if (members && members.length > 0) {
+      await supabase.from('cycle_payments').insert(
+        members.map((member) => ({
+          cycle_id: cycleId,
+          member_id: member.id,
+          has_paid: false,
+          verified_by_receiver: false,
+          verified_by_admin: false,
+        }))
+      )
+    }
+  }
+
+  // Log activity
+  await supabase.from('cycle_activities').insert({
+    cycle_id: cycleId,
+    activity_type: 'winner_declared',
+    user_id: finalWinner.user_id,
+    metadata: {
+      winner_id: finalWinner.user_id,
+      method: 'auto_final_round',
+      amount: totalAmount,
+      note: 'Last eligible member - auto-selected',
+    },
+  })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  return { success: true, autoSelected: true, message: 'Final member auto-selected as winner!' }
+}
+
+  // ✅ NORMAL FLOW: Multiple eligible members remain
+  if (group.allocation_method === 'bidding') {
+    // Find lowest bid
+    const { data: bids } = await supabase
+      .from('cycle_bids')
+      .select('*')
+      .eq('cycle_id', cycleId)
+      .order('bid_amount', { ascending: true })
+      .limit(1)
+
+    if (!bids || bids.length === 0) {
+      return { error: 'No bids placed yet. Cannot end bidding.' }
+    }
+
+    const winningBid = bids[0]
+
+    // Update cycle with winner
+    const { error: updateError } = await supabase
+      .from('payment_cycles')
+      .update({
+        status: 'payment',
+        bidding_end_date: new Date().toISOString(),
+        winner_id: winningBid.user_id,
+        winning_bid_amount: winningBid.bid_amount
+      })
+      .eq('id', cycleId)
+
+    if (updateError) {
+      return { error: 'Failed to end bidding: ' + updateError.message }
+    }
+
+    // ✅ FIXED: Get the winner member first, then update using member ID
+    const { data: winnerMember } = await supabase
+      .from('rosca_members')
+      .select('id')
+      .eq('rosca_id', groupId)
+      .eq('user_id', winningBid.user_id)
+      .single()
+
+    if (winnerMember) {
+      // ✅ FIXED: Mark winner as having received (using member ID)
+      const { error: memberError } = await supabase
+        .from('rosca_members')
+        .update({ has_received: true })
+        .eq('id', winnerMember.id)  // ✅ Use member.id
+
+      if (memberError) {
+        console.error('Error marking winner:', memberError)
+      }
+
+      // Auto-verify winner's own payment
+      await supabase
+        .from('cycle_payments')
+        .update({
+          has_paid: true,
+          paid_at: new Date().toISOString(),
+          verified_by_receiver: true,
+          receiver_verified_at: new Date().toISOString()
+        })
+        .eq('cycle_id', cycleId)
+        .eq('member_id', winnerMember.id)
+    }
+
+    // Create payment records if they don't exist
+    const { data: existingPayments } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+
+    if (!existingPayments || existingPayments.length === 0) {
+      const { data: members } = await supabase
+        .from('rosca_members')
+        .select('id')
+        .eq('rosca_id', groupId)
+
+      if (members && members.length > 0) {
+        await supabase
+          .from('cycle_payments')
+          .insert(
+            members.map((member) => ({
+              cycle_id: cycleId,
+              member_id: member.id,
+              has_paid: false,
+              verified_by_receiver: false,
+              verified_by_admin: false
+            }))
+          )
+      }
+    }
+
+          // Log bidding closed
+          await supabase.from('cycle_activities').insert({
+            cycle_id: cycleId,
+            activity_type: 'bidding_closed',
+            user_id: user.id
+          })
+
+    // Log activity
+    await supabase
+      .from('cycle_activities')
+      .insert({
+        cycle_id: cycleId,
+        activity_type: 'winner_declared',
+        user_id: winningBid.user_id,
+        metadata: { winner_id: winningBid.user_id, amount: winningBid.bid_amount }
+      })
+  } else {
+    // Random/Banker allocation - Select winner based on allocation method
+    let selectedWinner
+    
+    if (group.allocation_method === 'random') {
+      // Random selection
+      const randomIndex = Math.floor(Math.random() * eligibleMembers.length)
+      selectedWinner = eligibleMembers[randomIndex]
+    } else if (group.allocation_method === 'banker') {
+      // Sequential by slot number (banker decides order)
+      selectedWinner = eligibleMembers.sort((a, b) => a.slot_number - b.slot_number)[0]
+    } else {
+      // Fallback to sequential
+      selectedWinner = eligibleMembers.sort((a, b) => a.slot_number - b.slot_number)[0]
+    }
+
+    // Calculate total amount using actual member count
+    const totalAmount = group.contribution_amount * (memberCount || 0)
+
+    // Update cycle with winner
+    const { error: updateError } = await supabase
+      .from('payment_cycles')
+      .update({
+        status: 'payment',
+        bidding_end_date: new Date().toISOString(),
+        winner_id: selectedWinner.user_id,
+        winning_bid_amount: totalAmount
+      })
+      .eq('id', cycleId)
+
+    if (updateError) {
+      return { error: 'Failed to start payment phase: ' + updateError.message }
+    }
+
+    // ✅ FIXED: Mark winner as having received (using member ID)
+    const { error: memberError } = await supabase
+      .from('rosca_members')
+      .update({ has_received: true })
+      .eq('id', selectedWinner.id)  // ✅ Use member.id
+
+    if (memberError) {
+      console.error('Error marking winner:', memberError)
+    }
+
+    // Auto-verify winner's own payment
+    const { data: winnerPayment } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+      .eq('member_id', selectedWinner.id)
+      .single()
+
+    if (winnerPayment) {
+      await supabase
+        .from('cycle_payments')
+        .update({
+          has_paid: true,
+          paid_at: new Date().toISOString(),
+          verified_by_receiver: true,
+          receiver_verified_at: new Date().toISOString()
+        })
+        .eq('id', winnerPayment.id)
+    }
+
+    // Create payment records if they don't exist
+    const { data: existingPayments } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+
+    if (!existingPayments || existingPayments.length === 0) {
+      const { data: members } = await supabase
+        .from('rosca_members')
+        .select('id')
+        .eq('rosca_id', groupId)
+
+      if (members && members.length > 0) {
+        await supabase
+          .from('cycle_payments')
+          .insert(
+            members.map((member) => ({
+              cycle_id: cycleId,
+              member_id: member.id,
+              has_paid: false,
+              verified_by_receiver: false,
+              verified_by_admin: false
+            }))
+          )
+      }
+    }
+
+    // Log activity
+    await supabase
+      .from('cycle_activities')
+      .insert({
+        cycle_id: cycleId,
+        activity_type: 'winner_declared',
+        user_id: selectedWinner.user_id,
+        metadata: {
+          winner_id: selectedWinner.user_id,
+          method: group.allocation_method,
+          amount: totalAmount,
+        },
+      })
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  return { success: true }
+}
+
+
+/**
+ * End Payment Collection Phase
+ */
+export async function endPaymentPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can end payment phase' }
+  }
+
+  // Get cycle winner
+  const { data: cycleData } = await supabase
+    .from('payment_cycles')
+    .select('winner_id')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycleData?.winner_id) {
+    return { error: 'Cycle winner not found' }
+  }
+
+  // Get winner's member_id
+  const { data: winnerMember } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .eq('user_id', cycleData.winner_id)
+    .single()
+
+  // Get all unverified payments
+  const { data: allPayments } = await supabase
+    .from('cycle_payments')
+    .select('*')
+    .eq('cycle_id', cycleId)
+    .eq('verified_by_receiver', false)
+
+  // Filter out winner's payment in JavaScript
+  const unpaidPayments = allPayments?.filter(p => p.member_id !== winnerMember?.id) || []
+  const unpaidCount = unpaidPayments.length
+
+  if (unpaidCount > 0) {
+    return { 
+      error: `${unpaidCount} payment(s) not yet verified. Verify all payments before ending cycle.`,
+      unpaidCount 
+    }
+  }
+
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'completed',
+      cycle_end_date: new Date().toISOString()
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to complete cycle: ' + updateError.message }
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'cycle_completed',
+      user_id: user.id
+    })
+
+
+    // ✅ NEW: Check if ALL members have received - if yes, mark ROSCA as completed
+  const { data: allMembers } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+
+  const allHaveReceived = allMembers?.every(m => m.has_received === true)
+
+  if (allHaveReceived) {
+  // Mark ROSCA as completed
+    await supabase
+      .from('roscas')
+      .update({ status: 'completed' })
+      .eq('id', groupId)
+  
+    console.log('🎉 ROSCA completed! All members have received their payout.')
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * Place a bid in the current cycle
+ */
+export async function placeBid(cycleId: string, bidAmount: number, roscaId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: member } = await supabase
+    .from('rosca_members')
+    .select('id, has_received')
+    .eq('rosca_id', roscaId)
+    .eq('user_id', user.id)
+    .single()
+
+  if (!member) {
+    return { error: 'You are not a member of this group' }
+  }
+
+  if (member.has_received) {
+    return { error: 'You have already received payout and cannot bid again' }
+  }
+
+  const { data: cycle } = await supabase
+    .from('payment_cycles')
+    .select('status, winning_bid_amount')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycle || cycle.status !== 'bidding') {
+    return { error: 'Bidding is not active for this cycle' }
+  }
+
+  const { data: lowestBid } = await supabase
+    .from('cycle_bids')
+    .select('bid_amount')
+    .eq('cycle_id', cycleId)
+    .order('bid_amount', { ascending: true })
+    .limit(1)
+    .single()
+
+  const currentLowest = lowestBid?.bid_amount || cycle.winning_bid_amount
+
+  if (bidAmount >= currentLowest) {
+    return { error: `Bid must be lower than current lowest (£${currentLowest})` }
+  }
+
+  const { error: bidError } = await supabase
+    .from('cycle_bids')
+    .insert({
+      cycle_id: cycleId,
+      user_id: user.id,
+      bid_amount: bidAmount
+    })
+
+  if (bidError) {
+    return { error: 'Failed to place bid' }
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'bid_placed',
+      user_id: user.id,
+      metadata: { bid_amount: bidAmount }
+    })
+
+  revalidatePath(`/dashboard/groups/${roscaId}`)
+  return { success: true }
+}
+
+/**
+ * Mark payment as made by current user
+ */
+export async function markPaymentMade(cycleId: string, roscaId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    console.error('❌ Not authenticated')
+    return { error: 'Not authenticated' }
+  }
+
+  console.log('🔍 Finding member for user:', user.id, 'in rosca:', roscaId)
+
+  const { data: member, error: memberError } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', roscaId)
+    .eq('user_id', user.id)
+    .single()
+
+  console.log('👤 Member found:', member, 'Error:', memberError)
+
+  if (!member) {
+    console.error('❌ Not a member')
+    return { error: 'Not a member' }
+  }
+
+  console.log('💾 Updating payment for cycle:', cycleId, 'member:', member.id)
+
+  const { data: updateData, error } = await supabase
+    .from('cycle_payments')
+    .update({
+      has_paid: true,
+      paid_at: new Date().toISOString()
+    })
+    .eq('cycle_id', cycleId)
+    .eq('member_id', member.id)
+    .select()
+
+  console.log('✅ Update result:', updateData, 'Error:', error)
+
+  if (error) {
+    console.error('❌ Failed to mark payment:', error)
+    return { error: 'Failed to mark payment' }
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'payment_made',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${roscaId}`)
+  return { success: true }
+}
+
+/**
+ * Verify payment as receiver
+ */
+export async function verifyPayment(
+  cycleId: string, 
+  memberIdToVerify: string, 
+  roscaId: string
+) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: cycle } = await supabase
+    .from('payment_cycles')
+    .select('winner_id')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycle || cycle.winner_id !== user.id) {
+    return { error: 'Only the payout receiver can verify payments' }
+  }
+
+  const { error } = await supabase
+    .from('cycle_payments')
+    .update({
+      verified_by_receiver: true,
+      receiver_verified_at: new Date().toISOString()
+    })
+    .eq('cycle_id', cycleId)
+    .eq('member_id', memberIdToVerify)
+
+  if (error) {
+    return { error: 'Failed to verify payment' }
+  }
+
+  // ✅ NEW: Fetch member's name before logging activity
+  const { data: memberData } = await supabase
+    .from('rosca_members')
+    .select('user_id')
+    .eq('id', memberIdToVerify)
+    .single()
+
+  const { data: profileData } = await supabase
+    .from('profiles')
+    .select('full_name')
+    .eq('id', memberData?.user_id)
+    .single()
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'payment_verified',
+      user_id: user.id,
+      metadata: { 
+        verified_member_id: memberIdToVerify, 
+        verified_member_name: profileData?.full_name || 'a member'  // ✅ Now defined
+      }
+    })
+
+  revalidatePath(`/dashboard/groups/${roscaId}`)
+  return { success: true }
+}
+
+
+/**
+ * Admin verification for overdue payments
+ */
+export async function adminVerifyPayment(
+  cycleId: string,
+  memberIdToVerify: string,
+  roscaId: string
+) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (profile?.role !== 'admin') {
+    return { error: 'Admin access required' }
+  }
+
+  const { error } = await supabase
+    .from('cycle_payments')
+    .update({
+      verified_by_admin: true,
+      admin_verified_at: new Date().toISOString(),
+      admin_id: user.id
+    })
+    .eq('cycle_id', cycleId)
+    .eq('member_id', memberIdToVerify)
+
+  if (error) {
+    return { error: 'Failed to verify payment' }
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'admin_verified_payment',
+      user_id: user.id,
+      metadata: { verified_member_id: memberIdToVerify }
+    })
+
+  revalidatePath(`/dashboard/groups/${roscaId}`)
+  return { success: true }
+}
+
+/**
+ * Reset ROSCA - Clear all has_received flags to start fresh
+ * Only creator/admin can do this when ALL members have received
+ */
+export async function resetRosca(groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Check permissions
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only group creator or admin can reset ROSCA' }
+  }
+
+  // Check if there are any active cycles
+  const { data: activeCycles } = await supabase
+    .from('payment_cycles')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .in('status', ['pending', 'bidding', 'payment', 'overdue'])
+
+  if (activeCycles && activeCycles.length > 0) {
+    return { error: 'Cannot reset while there are active cycles. Complete all cycles first.' }
+  }
+
+  // Verify ALL members have received before allowing reset
+  const { data: members } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+
+  const allReceived = members?.every(m => m.has_received) || false
+
+  if (!allReceived) {
+    return { error: 'Cannot reset: Not all members have received payouts yet.' }
+  }
+
+  // Reset all members' has_received flag
+  const { error: resetError } = await supabase
+    .from('rosca_members')
+    .update({ has_received: false })
+    .eq('rosca_id', groupId)
+
+  if (resetError) {
+    return { error: 'Failed to reset ROSCA: ' + resetError.message }
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+
+
+
+/**
+ * Save winner's payment details for current cycle
+ * Only the winner can update their payment details
+ */
+export async function saveWinnerPaymentDetails(
+  cycleId: string,
+  groupId: string,
+  paymentData: {
+    methodType: 'UPI' | 'Bank' | 'Crypto' | 'PayPal' | 'Cash' | 'Other'
+    details: Record<string, any>
+    instructions?: string
+  }
+) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Verify user is the winner of this cycle
+  const { data: cycle } = await supabase
+    .from('payment_cycles')
+    .select('winner_id, status')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycle) {
+    return { error: 'Cycle not found' }
+  }
+
+  if (cycle.winner_id !== user.id) {
+    return { error: 'Only the cycle winner can set payment details' }
+  }
+
+  if (cycle.status !== 'payment' && cycle.status !== 'overdue') {
+    return { error: 'Payment details can only be set during payment phase' }
+  }
+
+  // Update payment details
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      payment_method_type: paymentData.methodType,
+      payment_details: paymentData.details,
+      payment_instructions: paymentData.instructions || null,
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to save payment details: ' + updateError.message }
+  }
+
+// Log activity
+const { error: activityError } = await supabase
+  .from('cycle_activities')
+  .insert({
+    cycle_id: cycleId,
+    activity_type: 'payment_details_published',
+    user_id: user.id,
+    metadata: {
+      method_type: paymentData.methodType,
+    }
+  })
+
+if (activityError) {
+  console.error('Failed to log payment_details_published activity:', activityError)
+}
+
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+
+
+
+
+'use server'
+
+import { createClient } from '@/lib/supabase/server'
+import { revalidatePath } from 'next/cache'
+
+/**
+ * Add Member to Group Server Action
+ */
+export async function addMemberToGroup(groupId: string, memberEmail: string) {
+  const supabase = await createClient()
+  
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  
+  if (authError || !user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group, error: groupError } = await supabase
+    .from('roscas')
+    .select('id, created_by, total_slots')
+    .eq('id', groupId)
+    .single()
+
+  if (groupError || !group) {
+    return { error: 'Group not found' }
+  }
+
+  if (group.created_by !== user.id) {
+    return { error: 'Only group creator can add members' }
+  }
+
+  const { data: allProfiles } = await supabase
+    .from('profiles')
+    .select('id, email')
+  
+  const memberProfile = allProfiles?.find(
+    p => p.email?.toLowerCase() === memberEmail.trim().toLowerCase()
+  )
+
+  if (!memberProfile) {
+    return { error: 'User not found. They must create an account first.' }
+  }
+
+  const { data: existingMember } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .eq('user_id', memberProfile.id)
+    .single()
+
+  if (existingMember) {
+    return { error: 'User is already a member of this group' }
+  }
+
+  const { count: currentMembers } = await supabase
+    .from('rosca_members')
+    .select('id', { count: 'exact', head: true })
+    .eq('rosca_id', groupId)
+
+  if (currentMembers !== null && currentMembers >= group.total_slots) {
+    return { error: 'Group is full' }
+  }
+
+  const nextSlot = (currentMembers || 0) + 1
+
+  const { data: insertedMember, error: insertError } = await supabase
+    .from('rosca_members')
+    .insert({
+      rosca_id: groupId,
+      user_id: memberProfile.id,
+      slot_number: nextSlot,
+      has_received: false
+    })
+    .select()
+    .single()
+
+  if (insertError) {
+    console.error('Insert error:', insertError)
+    return { error: 'Failed to add member: ' + insertError.message }
+  }
+
+  console.log('✅ Member added successfully:', insertedMember)
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { 
+    success: true,
+    memberName: memberProfile.email 
+  }
+}
+
+/**
+ * Start a new cycle (creates cycle in 'pending' status)
+ * Admin will manually start bidding phase
+ */
+export async function startNewCycle(groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('*')
+    .eq('id', groupId)
+    .single()
+
+  if (!group) {
+    return { error: 'Group not found' }
+  }
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only group creator or admin can start cycles' }
+  }
+
+  // Check if there's already an active cycle
+  const { data: activeCycle } = await supabase
+    .from('payment_cycles')
+    .select('id')
+    .eq('rosca_id', groupId)
+    .in('status', ['pending', 'bidding', 'payment', 'overdue'])
+    .single()
+
+  if (activeCycle) {
+    return { error: 'There is already an active cycle. Complete it first.' }
+  }
+
+  const { count: cycleCount } = await supabase
+    .from('payment_cycles')
+    .select('id', { count: 'exact', head: true })
+    .eq('rosca_id', groupId)
+
+  const nextCycleNumber = (cycleCount || 0) + 1
+
+  const totalAmount = group.contribution_amount * group.total_slots
+
+  // Create cycle in 'pending' status - admin will manually start bidding
+  const { data: cycle, error: cycleError } = await supabase
+    .from('payment_cycles')
+    .insert({
+      rosca_id: groupId,
+      cycle_number: nextCycleNumber,
+      status: 'pending',
+      bidding_start_date: null,
+      bidding_end_date: null,
+      payment_deadline_date: null,
+      cycle_end_date: null,
+      winning_bid_amount: totalAmount
+    })
+    .select()
+    .single()
+
+  if (cycleError) {
+    return { error: 'Failed to create cycle: ' + cycleError.message }
+  }
+
+  // Create payment records for all members
+  const { data: members } = await supabase
+    .from('rosca_members')
+    .select('id')
+    .eq('rosca_id', groupId)
+
+  if (members && members.length > 0) {
+    await supabase
+      .from('cycle_payments')
+      .insert(
+        members.map((member) => ({
+          cycle_id: cycle.id,
+          member_id: member.id,
+          has_paid: false,
+          verified_by_receiver: false,
+          verified_by_admin: false
+        }))
+      )
+  }
+
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycle.id,
+      activity_type: 'cycle_created',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true, cycleNumber: nextCycleNumber }
+}
+
+/**
+ * Start Bidding Phase
+ * Admin/Creator manually starts the bidding
+ */
+export async function startBiddingPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Verify user is admin/creator
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can start bidding' }
+  }
+
+  // Update cycle to bidding status
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'bidding',
+      bidding_start_date: new Date().toISOString()
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to start bidding: ' + updateError.message }
+  }
+
+  // Log activity
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'bidding_opened',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * End Bidding Phase and Select Winner
+ * Admin/Creator manually ends bidding
+ */
+export async function endBiddingPhase(cycleId: string, groupId: string) {
+  console.log('🔥 endBiddingPhase called with:', { cycleId, groupId })  // ADD THIS
+  
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  console.log('👤 User:', user?.id)  // ADD THIS
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by, allocation_method')
+    .eq('id', groupId)
+    .single()
+
+  console.log('📦 Group:', group)  // ADD THIS
+
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can end bidding' }
+  }
+
+  if (group?.allocation_method === 'bidding') {
+    // Find lowest bid
+    const { data: bids } = await supabase
+      .from('cycle_bids')
+      .select('*')
+      .eq('cycle_id', cycleId)
+      .order('bid_amount', { ascending: true })
+      .limit(1)
+
+    if (!bids || bids.length === 0) {
+      return { error: 'No bids placed yet. Cannot end bidding.' }
+    }
+
+    const winningBid = bids[0]
+
+    // Update cycle with winner
+    const { error: updateError } = await supabase
+      .from('payment_cycles')
+      .update({
+        status: 'payment',
+        bidding_end_date: new Date().toISOString(),
+        winner_id: winningBid.user_id,
+        winning_bid_amount: winningBid.bid_amount
+      })
+      .eq('id', cycleId)
+
+    if (updateError) {
+      return { error: 'Failed to end bidding: ' + updateError.message }
+    }
+
+    // Mark winner as having received
+    await supabase
+      .from('rosca_members')
+      .update({ has_received: true })
+      .eq('rosca_id', groupId)
+      .eq('user_id', winningBid.user_id)
+
+    // FIXED: Create payment records if they don't exist
+    // FIXED: Create payment records if they don't exist
+    console.log('💳 Checking for existing payments...')  // ADD THIS
+    
+    const { data: existingPayments } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+    
+    console.log('💳 Existing payments:', existingPayments)  // ADD THIS
+
+
+    if (!existingPayments || existingPayments.length === 0) {
+      const { data: members } = await supabase
+        .from('rosca_members')
+        .select('id')
+        .eq('rosca_id', groupId)
+
+      if (members && members.length > 0) {
+        await supabase
+          .from('cycle_payments')
+          .insert(
+            members.map((member) => ({
+              cycle_id: cycleId,
+              member_id: member.id,
+              has_paid: false,
+              verified_by_receiver: false,
+              verified_by_admin: false
+            }))
+          )
+      }
+    }
+
+    // Log activity
+    await supabase
+      .from('cycle_activities')
+      .insert({
+        cycle_id: cycleId,
+        activity_type: 'bidding_closed',
+        user_id: user.id,
+        metadata: { winner_id: winningBid.user_id, amount: winningBid.bid_amount }
+      })
+  } else {
+    // Random/Sequential allocation - just move to payment
+    const { error: updateError } = await supabase
+      .from('payment_cycles')
+      .update({
+        status: 'payment',
+        bidding_end_date: new Date().toISOString()
+      })
+      .eq('id', cycleId)
+
+    if (updateError) {
+      return { error: 'Failed to start payment phase: ' + updateError.message }
+    }
+
+    // FIXED: Create payment records if they don't exist
+    const { data: existingPayments } = await supabase
+      .from('cycle_payments')
+      .select('id')
+      .eq('cycle_id', cycleId)
+
+    if (!existingPayments || existingPayments.length === 0) {
+      const { data: members } = await supabase
+        .from('rosca_members')
+        .select('id')
+        .eq('rosca_id', groupId)
+
+      if (members && members.length > 0) {
+        await supabase
+          .from('cycle_payments')
+          .insert(
+            members.map((member) => ({
+              cycle_id: cycleId,
+              member_id: member.id,
+              has_paid: false,
+              verified_by_receiver: false,
+              verified_by_admin: false
+            }))
+          )
+      }
+    }
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * End Payment Collection Phase and Complete Cycle
+ * Admin/Creator manually closes the cycle
+ */
+export async function endPaymentPhase(cycleId: string, groupId: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  const { data: group } = await supabase
+    .from('roscas')
+    .select('created_by')
+    .eq('id', groupId)
+    .single()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const isAdmin = profile?.role === 'admin'
+  const isCreator = group?.created_by === user.id
+
+  if (!isAdmin && !isCreator) {
+    return { error: 'Only admin or creator can end payment phase' }
+  }
+
+  // Check if all payments are verified
+  const { data: payments, count: unpaidCount } = await supabase
+    .from('cycle_payments')
+    .select('*', { count: 'exact' })
+    .eq('cycle_id', cycleId)
+    .eq('verified_by_receiver', false)
+
+  if (unpaidCount && unpaidCount > 0) {
+    return { 
+      error: `${unpaidCount} payment(s) not yet verified. Verify all payments before ending cycle.`,
+      unpaidCount 
+    }
+  }
+
+  // Mark cycle as completed
+  const { error: updateError } = await supabase
+    .from('payment_cycles')
+    .update({
+      status: 'completed',
+      cycle_end_date: new Date().toISOString()
+    })
+    .eq('id', cycleId)
+
+  if (updateError) {
+    return { error: 'Failed to complete cycle: ' + updateError.message }
+  }
+
+  // Log activity
+  await supabase
+    .from('cycle_activities')
+    .insert({
+      cycle_id: cycleId,
+      activity_type: 'cycle_completed',
+      user_id: user.id
+    })
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+/**
+ * Place a bid (for bidding allocation method)
+ */
+export async function placeBid(cycleId: string, groupId: string, bidAmount: number) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  
+  if (!user) {
+    return { error: 'Not authenticated' }
+  }
+
+  // Get cycle details
+  const { data: cycle } = await supabase
+    .from('payment_cycles')
+    .select('*, roscas(contribution_amount, total_slots)')
+    .eq('id', cycleId)
+    .single()
+
+  if (!cycle || cycle.status !== 'bidding') {
+    return { error: 'Bidding is not open for this cycle' }
+  }
+
+  // Check if user is member and hasn't received
+  const { data: member } = await supabase
+    .from('rosca_members')
+    .select('has_received')
+    .eq('rosca_id', groupId)
+    .eq('user_id', user.id)
+    .single()
+
+  if (!member) {
+    return { error: 'You are not a member of this group' }
+  }
+
+  if (member.has_received) {
+    return { error: 'You have already received your payout' }
+  }
+
+  const totalAmount = cycle.roscas.contribution_amount * cycle.roscas.total_slots
+
+  if (bidAmount > totalAmount) {
+    return { error: 'Bid cannot exceed total pool amount' }
+  }
+
+  if (bidAmount < cycle.roscas.contribution_amount) {
+    return { error: 'Bid must be at least the contribution amount' }
+  }
+
+  // Check for existing bid
+  const { data: existingBid } = await supabase
+    .from('cycle_bids')
+    .select('id')
+    .eq('cycle_id', cycleId)
+    .eq('user_id', user.id)
+    .single()
+
+  if (existingBid) {
+    // Update existing bid
+    const { error: updateError } = await supabase
+      .from('cycle_bids')
+      .update({ bid_amount: bidAmount })
+      .eq('id', existingBid.id)
+
+    if (updateError) {
+      return { error: 'Failed to update bid: ' + updateError.message }
+    }
+  } else {
+    // Insert new bid
+    const { error: insertError } = await supabase
+      .from('cycle_bids')
+      .insert({
+        cycle_id: cycleId,
+        user_id: user.id,
+        bid_amount: bidAmount
+      })
+
+    if (insertError) {
+      return { error: 'Failed to place bid: ' + insertError.message }
+    }
+  }
+
+  revalidatePath(`/dashboard/groups/${groupId}`)
+  
+  return { success: true }
+}
+
+
+'use client'
+
+import { useRouter } from 'next/navigation'
+import { createClient } from '../../lib/supabase/client'
+import { useState } from 'react'
+
+export default function SignOutButton() {
+  const router = useRouter()
+  const supabase = createClient()
+  const [loading, setLoading] = useState(false)
+
+  const handleSignOut = async () => {
+    setLoading(true)
+    try {
+      const { error } = await supabase.auth.signOut()
+      if (error) throw error
+      
+      router.push('/auth/signin')
+      router.refresh()
+    } catch (error) {
+      console.error('Error signing out:', error)
+      alert('Failed to sign out. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <button
+      onClick={handleSignOut}
+      disabled={loading}
+      className="px-6 py-3 bg-red-600 hover:bg-red-700 disabled:bg-red-400 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
+    >
+      {loading ? (
+        <span className="flex items-center justify-center">
+          <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          Signing Out...
+        </span>
+      ) : 'Sign Out'}
+    </button>
+  )
+}
+export default function AuthLayout({ 
+  children 
+}: { 
+  children: React.ReactNode 
+}) {
+  return <>{children}</>
+}
+import { createClient } from '../../../lib/supabase/server'
+import { NextResponse } from 'next/server'
+
+export async function POST(request: Request) {
+  const supabase = await createClient()
+  await supabase.auth.signOut()
+  
+  return NextResponse.redirect(new URL('/auth/signin', request.url))
+}
+import { createClient } from '@/lib/supabase/server'
+import { type EmailOtpType } from '@supabase/supabase-js'
+import { NextRequest, NextResponse } from 'next/server'
+
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url)
+  const token_hash = searchParams.get('token_hash')
+  const type = searchParams.get('type') as EmailOtpType | null
+  const next = searchParams.get('next') || '/dashboard'
+
+  if (token_hash && type) {
+    const supabase = await createClient()
+
+    const { error } = await supabase.auth.verifyOtp({
+      type,
+      token_hash,
+    })
+
+    if (!error) {
+      // Redirect to password reset page
+      return NextResponse.redirect(new URL('/auth/reset-password', request.url))
+    }
+  }
+
+  // Redirect to error page
+  return NextResponse.redirect(new URL('/auth/signin?error=Could not verify reset link', request.url))
+}
+
+'use client'
+
+import { useState } from 'react'
+import { createClient } from '../../../lib/supabase/client'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { LoadingSpinner } from '../../../components/ui/Loading'
+import { Alert } from '../../../components/ui/Alert'
+import { validateEmail } from '../../../lib/validation'
+
+export default function SignInPage() {
+  const [formData, setFormData] = useState({
+    email: '',
+    password: ''
+  })
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const router = useRouter()
+  const supabase = createClient()
+
+  const handleSignIn = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setLoading(true)
+
+    try {
+      // Basic validation
+      const emailValidation = validateEmail(formData.email)
+      if (!emailValidation.isValid) {
+        throw new Error('Invalid credentials')
+      }
+
+      if (!formData.password) {
+        throw new Error('Invalid credentials')
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: formData.email,
+        password: formData.password,
+      })
+
+      if (error) throw new Error('Invalid credentials') // Generic error
+
+      router.push('/dashboard')
+      router.refresh()
+    } catch (error: any) {
+      // Always show generic error to prevent username enumeration
+      setError('Invalid credentials. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleGoogleSignIn = async () => {
+    setError(null)
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`,
+          queryParams: {
+            access_type: 'offline',
+            prompt: 'consent',
+          }
+        }
+      })
+
+      if (error) throw error
+    } catch (error: any) {
+      setError('Sign-in failed. Please try again.')
+    }
+  }
+
+
+
+  const handleAppleSignIn = async () => {
+  try {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'apple',
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      }
+    })
+
+    if (error) throw error
+  } catch (error: any) {
+    setError(error.message || 'Apple sign-in failed')
+  }
+}
+
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-white to-purple-50 p-4">
+      <div className="w-full max-w-md">
+        <div className="bg-white rounded-2xl shadow-xl p-8">
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-slate-900 mb-2">
+              Welcome Back
+            </h1>
+            <p className="text-slate-600">Sign in to your account</p>
+          </div>
+
+          {error && (
+            <div className="mb-6">
+              <Alert type="error" message={error} onClose={() => setError(null)} />
+            </div>
+          )}
+
+          <form onSubmit={handleSignIn} className="space-y-5">
+            <div>
+              <label htmlFor="email" className="block text-sm font-semibold text-slate-700 mb-2">
+                Email Address
+              </label>
+              <input
+                id="email"
+                type="email"
+                value={formData.email}
+                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                className="w-full px-4 py-3 text-slate-900 bg-white border-2 border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500"
+                placeholder="you@example.com"
+                disabled={loading}
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="password" className="block text-sm font-semibold text-slate-700 mb-2">
+                Password
+              </label>
+              <input
+                id="password"
+                type="password"
+                value={formData.password}
+                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                className="w-full px-4 py-3 text-slate-900 bg-white border-2 border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500"
+                placeholder="••••••••"
+                disabled={loading}
+                required
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <Link
+                href="/auth/forgot-password"
+                className="text-sm text-blue-600 hover:text-blue-700 font-medium transition"
+              >
+                Forgot password?
+              </Link>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 px-6 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 focus:ring-4 focus:ring-blue-300 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <>
+                  <LoadingSpinner size="sm" />
+                  <span>Signing In...</span>
+                </>
+              ) : (
+                'Sign In'
+              )}
+            </button>
+          </form>
+
+          <div className="mt-6">
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-300"></div>
+              </div>
+              <div className="relative flex justify-center text-sm">
+                <span className="px-4 bg-white text-slate-500">Or continue with</span>
+              </div>
+            </div>
+
+            {/* <button
+              onClick={handleGoogleSignIn}
+              disabled={loading}
+              className="mt-4 w-full bg-white border-2 border-slate-300 text-slate-700 py-3 px-6 rounded-lg font-semibold hover:bg-slate-50 focus:ring-4 focus:ring-slate-200 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span className="flex items-center justify-center gap-2">
+                🔍 Sign in with Google
+              </span>
+            </button>
+
+              <button
+                onClick={handleAppleSignIn}
+                disabled={loading}
+                className="mt-4 w-full bg-black border-2 border-black text-white py-3 px-6 rounded-lg font-semibold hover:bg-gray-900 focus:ring-4 focus:ring-gray-300 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <span className="flex items-center justify-center gap-2">
+                  🍎 Sign `in with Apple
+                </span>
+              </button> */}
+
+
+          </div>
+
+          <p className="mt-8 text-center text-slate-600">
+            Don't have an account?{' '}
+            <Link
+              href="/auth/signup"
+              className="text-blue-600 font-semibold hover:text-blue-700 transition"
+            >
+              Sign Up
+            </Link>
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+'use client'
+
+import { useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import { useRouter } from 'next/navigation'
+
+export default function ResetPasswordPage() {
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const router = useRouter()
+  const supabase = createClient()
+
+  const handleUpdatePassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+
+    // Validate passwords match
+    if (password !== confirmPassword) {
+      setError('Passwords do not match')
+      return
+    }
+
+    // Validate password length
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters')
+      return
+    }
+
+    setLoading(true)
+
+    try {
+      const { error } = await supabase.auth.updateUser({
+        password: password,
+      })
+
+      if (error) throw error
+
+      alert('Password updated successfully!')
+      router.push('/auth/signin')
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'An error occurred')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200 px-4 py-12">
+      <div className="max-w-md w-full bg-white p-8 rounded-xl shadow-2xl border border-slate-200">
+        <div className="text-center mb-8">
+          <h2 className="text-3xl font-bold text-slate-900">Set New Password</h2>
+          <p className="text-slate-700 mt-2">Enter your new password below</p>
+        </div>
+
+        {error && (
+          <div className="bg-red-50 border-l-4 border-red-600 text-red-900 px-4 py-3 rounded mb-6">
+            <p className="font-semibold">Error</p>
+            <p className="text-sm">{error}</p>
+          </div>
+        )}
+
+        <form onSubmit={handleUpdatePassword} className="space-y-5">
+          <div>
+            <label htmlFor="password" className="block text-sm font-semibold text-slate-900 mb-2">
+              New Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-4 py-3 text-slate-900 bg-white border-2 border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500"
+              placeholder="••••••••"
+              minLength={6}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="confirmPassword" className="block text-sm font-semibold text-slate-900 mb-2">
+              Confirm New Password
+            </label>
+            <input
+              id="confirmPassword"
+              type="password"
+              required
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              className="w-full px-4 py-3 text-slate-900 bg-white border-2 border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500"
+              placeholder="••••••••"
+              minLength={6}
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 disabled:cursor-not-allowed text-white font-bold rounded-lg transition shadow-lg hover:shadow-xl"
+          >
+            {loading ? 'Updating...' : 'Update Password'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+'use client'
+
+import { useState } from 'react'
+import { createClient } from '../../../lib/supabase/client'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { LoadingSpinner } from '../../../components/ui/Loading'
+import { Alert } from '../../../components/ui/Alert'
+import {
+  validateEmail,
+  validatePassword,
+  validateName,
+  validatePasswordMatch
+} from '../../../lib/validation'
+
+export default function SignUpPage() {
+  const [formData, setFormData] = useState({
+    name: '',
+    email: '',
+    password: '',
+    confirmPassword: ''
+  })
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+  const [globalError, setGlobalError] = useState<string | null>(null)
+  
+  const router = useRouter()
+  const supabase = createClient()
+
+  // Real-time field validation
+  const validateField = (field: string, value: string) => {
+    let validation
+    
+    switch (field) {
+      case 'email':
+        validation = validateEmail(value)
+        break
+      case 'password':
+        validation = validatePassword(value)
+        break
+      case 'name':
+        validation = validateName(value)
+        break
+      case 'confirmPassword':
+        validation = validatePasswordMatch(formData.password, value)
+        break
+      default:
+        return
+    }
+
+    setErrors(prev => ({
+      ...prev,
+      [field]: validation.isValid ? '' : validation.error || ''
+    }))
+  }
+
+  const handleChange = (field: string, value: string) => {
+    setFormData(prev => ({ ...prev, [field]: value }))
+    
+    // Clear error when user starts typing
+    if (errors[field]) {
+      setErrors(prev => ({ ...prev, [field]: '' }))
+    }
+  }
+
+  const handleBlur = (field: string) => {
+    validateField(field, formData[field as keyof typeof formData])
+  }
+
+  const handleSignUp = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setGlobalError(null)
+
+    // Validate all fields
+    const nameValidation = validateName(formData.name)
+    const emailValidation = validateEmail(formData.email)
+    const passwordValidation = validatePassword(formData.password)
+    const matchValidation = validatePasswordMatch(
+      formData.password,
+      formData.confirmPassword
+    )
+
+    const newErrors: Record<string, string> = {}
+    
+    if (!nameValidation.isValid) newErrors.name = nameValidation.error!
+    if (!emailValidation.isValid) newErrors.email = emailValidation.error!
+    if (!passwordValidation.isValid) newErrors.password = passwordValidation.error!
+    if (!matchValidation.isValid) newErrors.confirmPassword = matchValidation.error!
+
+    if (Object.keys(newErrors).length > 0) {
+      setErrors(newErrors)
+      return
+    }
+
+    setLoading(true)
+
+    try {
+      // Server-side validation
+      const validateResponse = await fetch('/api/auth/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: formData.email,
+          password: formData.password,
+          name: formData.name,
+          type: 'signup'
+        })
+      })
+
+      if (!validateResponse.ok) {
+        const data = await validateResponse.json()
+        throw new Error(data.error || 'Validation failed')
+      }
+
+      // Sign up
+      const { data, error } = await supabase.auth.signUp({
+        email: formData.email,
+        password: formData.password,
+        options: {
+          data: {
+            full_name: formData.name,
+          },
+          emailRedirectTo: `${window.location.origin}/auth/callback`
+        }
+      })
+
+      if (error) throw error
+
+      if (data?.user?.identities?.length === 0) {
+        setGlobalError('An account with this email already exists')
+        return
+      }
+
+      setSuccess(true)
+      
+      // Check if email confirmation is required
+      if (data.user && !data.session) {
+        setGlobalError('Please check your email to confirm your account')
+      } else {
+        setTimeout(() => router.push('/dashboard'), 1500)
+      }
+    } catch (error: any) {
+      setGlobalError(error.message || 'An error occurred during sign up')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleGoogleSignIn = async () => {
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`,
+          queryParams: {
+            access_type: 'offline',
+            prompt: 'consent',
+          }
+        }
+      })
+
+      if (error) throw error
+    } catch (error: any) {
+      setGlobalError(error.message || 'Google sign-in failed')
+    }
+  }
+
+
+
+
+ const handleAppleSignIn = async () => {
+  try {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'apple',
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      }
+    })
+
+    if (error) throw error
+  } catch (error: any) {
+    setGlobalError(error.message || 'Apple sign-in failed')
+  }
+}
+
+
+
+
+
+
+  if (success && !globalError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-white to-purple-50">
+        <div className="bg-white p-8 rounded-2xl shadow-xl text-center max-w-md">
+          <div className="text-6xl mb-4">✅</div>
+          <h2 className="text-2xl font-bold text-slate-900 mb-2">
+            Account Created!
+          </h2>
+          <p className="text-slate-600">Redirecting to dashboard...</p>
+          <div className="mt-6">
+            <LoadingSpinner size="md" />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-white to-purple-50 p-4">
+      <div className="w-full max-w-md">
+        <div className="bg-white rounded-2xl shadow-xl p-8">
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-slate-900 mb-2">
+              Create Account
+            </h1>
+            <p className="text-slate-600">Join us today</p>
+          </div>
+
+          {globalError && (
+            <div className="mb-6">
+              <Alert type="error" message={globalError} onClose={() => setGlobalError(null)} />
+            </div>
+          )}
+
+          <form onSubmit={handleSignUp} className="space-y-5">
+            <div>
+              <label htmlFor="name" className="block text-sm font-semibold text-slate-700 mb-2">
+                Full Name
+              </label>
+              <input
+                id="name"
+                type="text"
+                value={formData.name}
+                onChange={(e) => handleChange('name', e.target.value)}
+                onBlur={() => handleBlur('name')}
+                className={`w-full px-4 py-3 text-slate-900 bg-white border-2 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500 ${
+                  errors.name ? 'border-red-500' : 'border-slate-300'
+                }`}
+                placeholder="John Doe"
+                disabled={loading}
+                required
+              />
+              {errors.name && (
+                <p className="text-red-600 text-sm mt-1">{errors.name}</p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="email" className="block text-sm font-semibold text-slate-700 mb-2">
+                Email Address
+              </label>
+              <input
+                id="email"
+                type="email"
+                value={formData.email}
+                onChange={(e) => handleChange('email', e.target.value)}
+                onBlur={() => handleBlur('email')}
+                className={`w-full px-4 py-3 text-slate-900 bg-white border-2 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500 ${
+                  errors.email ? 'border-red-500' : 'border-slate-300'
+                }`}
+                placeholder="you@example.com"
+                disabled={loading}
+                required
+              />
+              {errors.email && (
+                <p className="text-red-600 text-sm mt-1">{errors.email}</p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="password" className="block text-sm font-semibold text-slate-700 mb-2">
+                Password
+              </label>
+              <input
+                id="password"
+                type="password"
+                value={formData.password}
+                onChange={(e) => handleChange('password', e.target.value)}
+                onBlur={() => handleBlur('password')}
+                className={`w-full px-4 py-3 text-slate-900 bg-white border-2 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500 ${
+                  errors.password ? 'border-red-500' : 'border-slate-300'
+                }`}
+                placeholder="••••••••"
+                disabled={loading}
+                required
+              />
+              {errors.password && (
+                <p className="text-red-600 text-sm mt-1">{errors.password}</p>
+              )}
+              <p className="text-xs text-slate-500 mt-1">
+                Min 8 chars, 1 uppercase, 1 lowercase, 1 number
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="confirmPassword" className="block text-sm font-semibold text-slate-700 mb-2">
+                Confirm Password
+              </label>
+              <input
+                id="confirmPassword"
+                type="password"
+                value={formData.confirmPassword}
+                onChange={(e) => handleChange('confirmPassword', e.target.value)}
+                onBlur={() => handleBlur('confirmPassword')}
+                className={`w-full px-4 py-3 text-slate-900 bg-white border-2 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500 ${
+                  errors.confirmPassword ? 'border-red-500' : 'border-slate-300'
+                }`}
+                placeholder="••••••••"
+                disabled={loading}
+                required
+              />
+              {errors.confirmPassword && (
+                <p className="text-red-600 text-sm mt-1">{errors.confirmPassword}</p>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 px-6 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 focus:ring-4 focus:ring-blue-300 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <>
+                  <LoadingSpinner size="sm" />
+                  <span>Creating Account...</span>
+                </>
+              ) : (
+                'Create Account'
+              )}
+            </button>
+          </form>
+
+          <div className="mt-6">
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-300"></div>
+              </div>
+              <div className="relative flex justify-center text-sm">
+                <span className="px-4 bg-white text-slate-500">Or continue with</span>
+              </div>
+            </div>
+
+            {/* <button
+              onClick={handleGoogleSignIn}
+              disabled={loading}
+              className="mt-4 w-full bg-white border-2 border-slate-300 text-slate-700 py-3 px-6 rounded-lg font-semibold hover:bg-slate-50 focus:ring-4 focus:ring-slate-200 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span className="flex items-center justify-center gap-2">
+                🔍 Sign up with Google
+              </span>
+            </button>
+          
+
+
+            <button
+              onClick={handleAppleSignIn}
+              disabled={loading}
+              className="mt-4 w-full bg-black border-2 border-black text-white py-3 px-6 rounded-lg font-semibold hover:bg-gray-900 focus:ring-4 focus:ring-gray-300 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+                <span className="flex items-center justify-center gap-2">
+                  🍎 Sign up with Apple
+                </span>
+            </button> */}
+
+            </div>
+
+
+          <p className="mt-8 text-center text-slate-600">
+            Already have an account?{' '}
+            <Link
+              href="/auth/signin"
+              className="text-blue-600 font-semibold hover:text-blue-700 transition"
+            >
+              Sign In
+            </Link>
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+import { createClient } from '../../../lib/supabase/server'
+import { NextResponse } from 'next/server'
+
+export async function GET(request: Request) {
+  const { searchParams, origin } = new URL(request.url)
+  const code = searchParams.get('code')
+  const next = searchParams.get('next') ?? '/dashboard'
+
+  if (code) {
+    const supabase = await createClient()
+    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    
+    if (!error) {
+      const forwardedHost = request.headers.get('x-forwarded-host')
+      const isLocalEnv = process.env.NODE_ENV === 'development'
+      
+      if (isLocalEnv) {
+        return NextResponse.redirect(`${origin}${next}`)
+      } else if (forwardedHost) {
+        return NextResponse.redirect(`https://${forwardedHost}${next}`)
+      } else {
+        return NextResponse.redirect(`${origin}${next}`)
+      }
+    }
+  }
+
+  return NextResponse.redirect(`${origin}/auth/signin?error=auth_failed`)
+}
+'use client'
+
+import { useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import Link from 'next/link'
+
+export default function ForgotPasswordPage() {
+  const [email, setEmail] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const supabase = createClient()
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setMessage(null)
+    setLoading(true)
+
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/auth/reset-password`,
+      })
+
+      if (error) throw error
+
+      setMessage('Check your email for the password reset link!')
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'An error occurred')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200 px-4 py-12">
+      <div className="max-w-md w-full bg-white p-8 rounded-xl shadow-2xl border border-slate-200">
+        <div className="text-center mb-8">
+          <h2 className="text-3xl font-bold text-slate-900">Forgot Password?</h2>
+          <p className="text-slate-700 mt-2">We&apos;ll send you a reset link</p>
+        </div>
+
+        {message && (
+          <div className="bg-green-50 border-l-4 border-green-600 text-green-900 px-4 py-3 rounded mb-6">
+            <p className="font-semibold">Success!</p>
+            <p className="text-sm">{message}</p>
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-50 border-l-4 border-red-600 text-red-900 px-4 py-3 rounded mb-6">
+            <p className="font-semibold">Error</p>
+            <p className="text-sm">{error}</p>
+          </div>
+        )}
+
+        <form onSubmit={handleResetPassword} className="space-y-5">
+          <div>
+            <label htmlFor="email" className="block text-sm font-semibold text-slate-900 mb-2">
+              Email Address
+            </label>
+            <input
+              id="email"
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full px-4 py-3 text-slate-900 bg-white border-2 border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition placeholder:text-slate-500"
+              placeholder="you@example.com"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 disabled:cursor-not-allowed text-white font-bold rounded-lg transition shadow-lg hover:shadow-xl"
+          >
+            {loading ? 'Sending...' : 'Send Reset Link'}
+          </button>
+        </form>
+
+        <p className="text-center text-sm text-slate-700 mt-6">
+          Remember your password?{' '}
+          <Link href="/auth/signin" className="text-blue-700 hover:text-blue-800 font-bold hover:underline">
+            Sign In
+          </Link>
+        </p>
+      </div>
+    </div>
+  )
+}
+import { redirect } from 'next/navigation'
+
+export default function HomePage() {
+  // Redirect to sign in page
+  redirect('/auth/signin')
+}
+
+
+@import "tailwindcss";
+
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+
+/* Tailwind v4 syntax - commented out for v3 compatibility
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+*/
+
+
+/* Use :root instead for Tailwind v3 */
+:root {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+
+.animate-slideDown {
+  animation: slideDown 0.3s ease-out;
+}
+
+
+/* ============================================
+   Input & Form Styles - Dark Text Only
+   ============================================ */
+
+/* Make input TEXT black/dark - keep backgrounds white */
+input[type="text"],
+input[type="email"],
+input[type="tel"],
+input[type="number"],
+input[type="password"],
+input[type="search"],
+input[type="url"],
+textarea,
+select {
+  color: rgb(17, 24, 39) !important; /* gray-900 - dark text */
+}
+
+/* Placeholder text should remain light gray for contrast */
+input::placeholder,
+textarea::placeholder {
+  color: rgb(156, 163, 175) !important; /* gray-400 - light gray */
+}
+
+
