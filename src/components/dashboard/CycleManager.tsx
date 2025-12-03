@@ -41,7 +41,7 @@ export default function CycleManager({
 
   // Set deadline dynamically based on cycle status
   const deadline = new Date(
-    cycle.status === 'bidding' ? '2025-12-03T17:00:00Z' : '2025-12-06T17:00:00Z'
+    cycle.status === 'bidding' ? '2025-12-04T17:00:00Z' : '2025-12-06T17:00:00Z'
   ).getTime()
 
   useEffect(() => {
@@ -118,7 +118,7 @@ export default function CycleManager({
             <span className="text-4xl">⏰</span>
               <div className="flex-1">
                 <p className="text-xs text-yellow-700 uppercase tracking-wide mb-1">
-                  03 December 2025 (Wednesday), 5:00 PM GMT
+                  04 December 2025 (Wednesday), 5:00 PM GMT
                 </p>
                 <p className="text-2xl font-bold text-yellow-900 mt-1">
                 {timeLeft}
